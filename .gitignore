@@ -212,3 +212,6 @@ ENV/
 # Pytorch specifics
 *.pth
 *.pt
+
+# Misc
+TODO.md

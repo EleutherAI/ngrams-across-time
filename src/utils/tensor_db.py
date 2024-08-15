@@ -19,6 +19,7 @@ class TensorDatabase:
         self.cursor: sqlite3.Cursor = self.conn.cursor()
         self.create_table()
 
+
     def create_table(self) -> None:
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS tensors (
@@ -38,6 +39,7 @@ class TensorDatabase:
             )
         ''')
         self.conn.commit()
+
 
     def add_tensor(self, tensor: torch.Tensor, tags: dict[str, Any]) -> None:
         timestamp = int(time.time() * 1000000)
@@ -60,6 +62,7 @@ class TensorDatabase:
                                     (tensor_id, key, 'text', str(value)))
         
         self.conn.commit()
+
 
     def query_tensors(self, **tags: Any) -> list[dict[str, Any]]:
         query: str = '''
@@ -95,6 +98,10 @@ class TensorDatabase:
             })
         
         return output
+
+
+    def query_last(self, **tags: Any) -> dict[str, Any]:
+        return self.query_tensors(**tags)[-1]
     
 
     def remove_tensor(self, id: int) -> None:
@@ -153,7 +160,8 @@ class TensorDatabase:
         self.cursor.execute("SELECT * FROM tags")
         tags = self.cursor.fetchall()
         for tag in tags:
-            print(tag)
+            print(tuple([item for item in tag if item is not None]))
+
 
 # Example usage
 if __name__ == "__main__":

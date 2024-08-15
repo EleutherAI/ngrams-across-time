@@ -14,7 +14,7 @@ from src.language.pythia import get_basic_pythia_model_names, get_model_size, lo
 
 from src.utils.divergences import kl_divergence_log_space, js_divergence_log_space
 from src.utils.tensor_db import TensorDatabase
-                    
+
 # TODO pass val and ngrams separately
 def process_datasets(
         revisions: dict[int, str], 
@@ -89,6 +89,7 @@ def parse_args():
     group.add_argument('--start', type=int, required=True, help='Start checkpoint')
     group.add_argument('--end', type=int, required=True, help='End checkpoint')
     group.add_argument('--batch_size', type=int, default=1)
+    group.add_argument('--n', type=int,nargs='+', default=1, help='n-grams to gather data for')
     
     group = parser.add_argument_group("Data arguments")
     group.add_argument('--out', type=str, default="/mnt/ssd-1/tensor_db", help='Location to save data in SQLite database')
@@ -107,7 +108,7 @@ def main():
     # Commented out: Disgusting hack to get around data lock
     data: dict[str | int, DataLoader] = {
         k: DataLoader(v, batch_size=args.batch_size, shuffle=False) # type: ignore
-        for k, v in get_ngram_datasets(tokenizer.vocab_size).items()
+        for k, v in get_ngram_datasets(tokenizer.vocab_size, ngrams=args.n).items()
     }
     # } for _ in range(torch.cuda.device_count())]
 

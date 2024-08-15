@@ -3,12 +3,12 @@ from datasets import load_from_disk, Dataset
 import numpy as np
 from torch.utils.data import Dataset as TorchDataset
 
-def get_ngram_datasets(vocab_size: int):
+def get_ngram_datasets(vocab_size: int, ngrams=list(range(1, 3))):
     len_ds = 1024
     source_dataset_path = '/mnt/ssd-1/lucia/features-across-time/data/pile-deduped/val_tokenized.hf'
     target_dataset_paths = [
         f'/mnt/ssd-1/lucia/features-across-time/data/pile-deduped/smoothed-{i}-gram-pile-dists-16bit.npy'
-        for i in range(2, 3)
+        for i in ngrams
     ]
 
     val: Dataset = load_from_disk(source_dataset_path) # type: ignore
@@ -16,8 +16,8 @@ def get_ngram_datasets(vocab_size: int):
     val.set_format("torch", columns=["input_ids"])
 
     ngram_data = {
-        i: NgramDataset(target_dataset_path, vocab_size, len_ds)
-        for i, target_dataset_path in enumerate(target_dataset_paths, start=1)
+        ngram: NgramDataset(target_dataset_path, vocab_size, len_ds)
+        for ngram, target_dataset_path in zip(ngrams, target_dataset_paths)
     }
     return {
         'val': val,

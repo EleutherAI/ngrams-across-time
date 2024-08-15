@@ -215,3 +215,7 @@ ENV/
 
 # Misc
 TODO.md
+test_tensor_db.sqlite
+test_tensors
+data
+output

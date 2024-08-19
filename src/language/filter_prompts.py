@@ -1,33 +1,30 @@
+from pathlib import Path
+
 import torch
-import os
 import numpy as np
 
 from src.utils.tensor_db import TensorDatabase
 
-import torch
 
 def calculate_diffs(
-        model_name="EleutherAI/pythia-14m",
-        out="output"
+        model_name: str = "EleutherAI/pythia-160m",
+        out: Path = Path("/mnt/ssd-1/tensor_db"),
 ):
-    db = TensorDatabase(
-        "/mnt/ssd-1/tensor_db/tensor_db.sqlite", 
-        "/mnt/ssd-1/tensor_db/tensors"
+    db = TensorDatabase(str(out / "tensor_db.sqlite"), str(out / "tensors"))
+
+    first = db.query_last(
+        model=model_name, 
+        step=128, 
+        metric='kl', 
+        ngram=2
     )
 
-    first = db.query_tensors(
+    second = db.query_last(
         model=model_name, 
         step=256, 
         metric='kl', 
         ngram=2
-    )[0]['tensor']
-
-    second = db.query_tensors(
-        model=model_name, 
-        step=512, 
-        metric='kl', 
-        ngram=2
-    )[0]['tensor']
+    )['tensor']
 
     # Calculate the difference in KL divergence between the two checkpoints
     kl_diff = first - second

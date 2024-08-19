@@ -4,6 +4,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
 from transformers import AutoTokenizer
@@ -36,6 +37,7 @@ def process_datasets(
         }
         for ngram in data.keys() if isinstance(ngram, int)
     }
+    loss = torch.zeros(1024, 2048)
 
     # Collect data
     for step, revision in revisions.items():
@@ -46,8 +48,17 @@ def process_datasets(
 
         ngram_iters = {k: iter(data[k]) for k in result.keys()}     
         for j, batch in tqdm(enumerate(data['val']), total=1024):
-            batch_size = len(batch[key])
-            logits = model(batch[key].cuda()).logits[:, :, :vocab_size]
+            tokens = batch[key].cuda()
+            batch_size = len(tokens)
+            logits = model(tokens).logits[:, :, :vocab_size]
+
+            if loss is not None: 
+                batch_loss = F.cross_entropy(logits[:, :-1].reshape(-1, vocab_size), tokens[:, 1:].reshape(-1), reduction='none')
+                loss[
+                    j * batch_size : (j * batch_size) + batch_size
+                ] = batch_loss.detach().cpu().reshape(batch_size, -1)
+                
+            del batch, tokens
             
             for n, loader in ngram_iters.items():
                 try:
@@ -62,8 +73,6 @@ def process_datasets(
                     del ngram_logprobs
                 except StopIteration:
                     print(f"Loader {loader} is exhausted")
-                
-            del batch
     
     # Save results
     db = TensorDatabase(str(out / "tensor_db.sqlite"), str(out / "tensors"))
@@ -76,8 +85,16 @@ def process_datasets(
                     'step': step,
                     'metric': metric,
                     'ngram': ngram,
+                    'num-shards': 2,
                 }
                 db.add_tensor(tensor, tags)
+    tags = {
+        'model': model_name,
+        'revision': revisions[step],
+        'step': step,
+        'metric': 'loss',
+    }
+    db.add_tensor(loss, tags)
     db.close()
 
 def parse_args():
@@ -85,11 +102,11 @@ def parse_args():
     
     group = parser.add_argument_group("Model arguments")
     group.add_argument('--model', type=str, nargs='+', help='Model names')
-    group.add_argument('--tokenizer', type=str, help='Tokenizer name')
+    group.add_argument('--tokenizer', type=str, default="EleutherAI/pythia-70m", help='Tokenizer name')
     group.add_argument('--start', type=int, required=True, help='Start checkpoint')
     group.add_argument('--end', type=int, required=True, help='End checkpoint')
     group.add_argument('--batch_size', type=int, default=1)
-    group.add_argument('--n', type=int,nargs='+', default=1, help='n-grams to gather data for')
+    group.add_argument('--n', type=int,nargs='+', default=[2], help='n-grams to gather data for')
     
     group = parser.add_argument_group("Data arguments")
     group.add_argument('--out', type=str, default="/mnt/ssd-1/tensor_db", help='Location to save data in SQLite database')
@@ -102,13 +119,15 @@ def main():
     args = parse_args()
 
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer if args.tokenizer else args.model[0])
+    # This is correct; tokenizer.vocab_size is incorrect.
+    vocab_size = len(tokenizer)
 
     # Load n-gram model distributions
     # Commented out: Disgusting hack to get around data lock
     data: dict[str | int, DataLoader] = {
-        k: DataLoader(v, batch_size=args.batch_size, shuffle=False) # type: ignore
-        for k, v in get_ngram_datasets(tokenizer.vocab_size, ngrams=args.n).items()
+        k: DataLoader(v, batch_size=args.batch_size, shuffle=False)
+        for k, v in get_ngram_datasets(vocab_size, ngrams=args.n).items()
     }
     # } for _ in range(torch.cuda.device_count())]
 
@@ -122,7 +141,7 @@ def main():
         ranged_checkpoints = dict(sorted(ranged_checkpoints.items()))
         print(ranged_checkpoints)
         
-        process_datasets(ranged_checkpoints, model_name, data, vocab_size=tokenizer.vocab_size, out=Path(args.out))
+        process_datasets(ranged_checkpoints, model_name, data, vocab_size=vocab_size, out=Path(args.out))
 
 def run_workers(worker, revisions: list[int] | list[str], **kwargs) -> list[dict]:
     """Parallelise inference over model checkpoints."""

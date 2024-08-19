@@ -217,5 +217,7 @@ ENV/
 TODO.md
 test_tensor_db.sqlite
 test_tensors
+test
 data
 output
+prototype.py

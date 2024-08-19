@@ -3,11 +3,11 @@ from datasets import load_from_disk, Dataset
 import numpy as np
 from torch.utils.data import Dataset as TorchDataset
 
-def get_ngram_datasets(vocab_size: int, ngrams=list(range(1, 3))):
-    len_ds = 1024
-    source_dataset_path = '/mnt/ssd-1/lucia/features-across-time/data/pile-deduped/val_tokenized.hf'
+
+def get_ngram_datasets(vocab_size: int, ngrams: list[int] = [1, 2, 3], len_ds: int = 1024):
+    source_dataset_path = 'data/val_tokenized.hf'
     target_dataset_paths = [
-        f'/mnt/ssd-1/lucia/features-across-time/data/pile-deduped/smoothed-{i}-gram-pile-dists-16bit.npy'
+        f'test/smoothed-{i}-gram-pile-dists-bf16-2_shards.npy'
         for i in ngrams
     ]
 
@@ -32,16 +32,20 @@ class NgramDataset(TorchDataset):
     def __len__(self):
         return len(self.dataset)
 
+    def bfloat16_to_float32(self, x):
+        """Convert bfloat16 values represented as uint16 to float32."""
+        x = np.asarray(x)
+        return np.frombuffer(
+            np.left_shift(x.astype(np.uint32), 16).tobytes(), 
+            dtype=np.float32
+        ).reshape(x.shape)
+
     def __getitem__(self, idx):
-        return torch.from_numpy(self.dataset[idx])
+        return torch.from_numpy(self.bfloat16_to_float32(self.dataset[idx]))
 
 if __name__ == '__main__':
     from torch.utils.data import DataLoader
-    datasets = get_ngram_datasets(50254)
-
-    for item in datasets[1]:
-        breakpoint()
-
+    datasets = get_ngram_datasets(50_254)
     dataloader = DataLoader(datasets[1], batch_size=32, shuffle=False)
 
     for batch in dataloader:

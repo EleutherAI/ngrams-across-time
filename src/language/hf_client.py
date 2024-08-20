@@ -1,11 +1,39 @@
 import re
 import time
+import requests
 
 from huggingface_hub import HfApi
-import torch
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
-def get_model_size(model_name: str): 
+
+def get_model_checkpoints(model_id):
+    api_url = f"https://huggingface.co/api/models/{model_id}/refs"
+    response = requests.get(api_url)
+    
+    if response.status_code == 200:
+        refs = response.json()
+        return parse_checkpoint_branches(refs['branches'])
+    else:
+        print(f"Error: {response.status_code}")
+        return None
+
+
+def parse_checkpoint_branches(branches) -> dict[int, str]:
+    revisions = {}
+    for branch in branches:
+        if not branch['ref'].startswith('refs/heads/'):
+            continue
+
+        ref_name = branch['ref'].split('/', 2)[-1]
+        match = re.match(r'(?:step[_]?|revision)?(\d+)', ref_name)
+        if match:
+            step = int(match.group(1))
+            revisions[step] = ref_name
+
+    return revisions
+
+
+def get_pythia_model_size(model_name: str): 
     match = re.search(r'(\d+(?:\.\d+)?[mb]?)', model_name.split("-")[-1], re.IGNORECASE)
     if not match:
         return 0  # If no size found, treat it as the smallest
@@ -18,18 +46,19 @@ def get_model_size(model_name: str):
     else:
         return int(size)
 
-def filter_basic_pythia_models(models):
+
+def filter_basic_pythia_models(model_names: list[str]) -> list[str]:
     basic_models = []
     pattern = r'^EleutherAI/pythia-(\d+(?:\.\d+)?[mb])$'
     
-    for model in models:
+    for model in model_names:
         if re.match(pattern, model, re.IGNORECASE):
             basic_models.append(model)
     
     return sorted(basic_models, key=lambda x: float(re.search(r'(\d+(?:\.\d+)?)', x).group(1))) # type: ignore
 
 
-def get_basic_pythia_model_names():
+def get_basic_pythia_model_names() -> list[str]:
     api = HfApi()
     models = api.list_models(author="EleutherAI", search="pythia")
     basic_models = filter_basic_pythia_models([model.modelId for model in models]) # type: ignore
@@ -57,7 +86,7 @@ def load_with_retries(model_name: str, revision: str, model_size: int):
         try:
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
-                torch_dtype=torch.float16,
+                torch_dtype="auto",
                 revision=revision,
                 cache_dir=".cache",
                 quantization_config=BitsAndBytesConfig(load_in_4bit=True) if model_size > 6e9 else None
@@ -69,3 +98,6 @@ def load_with_retries(model_name: str, revision: str, model_size: int):
                 time.sleep(2)
             else:
                 return None
+
+
+    

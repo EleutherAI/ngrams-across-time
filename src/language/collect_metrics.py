@@ -9,9 +9,8 @@ from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
 from transformers import AutoTokenizer
 
-from src.language.ngram_data import get_ngram_datasets
-from src.language.get_revisions import get_model_checkpoints
-from src.language.pythia import get_basic_pythia_model_names, get_model_size, load_with_retries
+from src.language.ngram_datasets import get_ngram_datasets
+from src.language.hf_client import get_model_checkpoints, get_basic_pythia_model_names, get_pythia_model_size, load_with_retries
 
 from src.utils.divergences import kl_divergence_log_space, js_divergence_log_space
 from src.utils.tensor_db import TensorDatabase
@@ -22,7 +21,7 @@ def process_datasets(
         model_name: str, 
         data: dict[str | int, DataLoader], 
         vocab_size: int,
-        out: Path, 
+        db_path: Path, 
         key='input_ids',
     ):
 
@@ -41,7 +40,7 @@ def process_datasets(
 
     # Collect data
     for step, revision in revisions.items():
-        model_size = get_model_size(model_name)
+        model_size = get_pythia_model_size(model_name)
         model = load_with_retries(model_name, revision, model_size)
         if not model:
             continue
@@ -75,7 +74,7 @@ def process_datasets(
                     print(f"Loader {loader} is exhausted")
     
     # Save results
-    db = TensorDatabase(str(out / "tensor_db.sqlite"), str(out / "tensors"))
+    db = TensorDatabase(str(db_path / "tensor_db.sqlite"), str(db_path / "tensors"))
     for ngram, ngram_data in result.items():
         for step, metrics in ngram_data.items():
             for metric, tensor in metrics.items():
@@ -97,14 +96,15 @@ def process_datasets(
     db.add_tensor(loss, tags)
     db.close()
 
+
 def parse_args():
     parser = ArgumentParser(description='Search for interesting data points between contiguous checkpoints')
     
     group = parser.add_argument_group("Model arguments")
     group.add_argument('--model', type=str, nargs='+', help='Model names')
-    group.add_argument('--tokenizer', type=str, default="EleutherAI/pythia-70m", help='Tokenizer name')
     group.add_argument('--start', type=int, required=True, help='Start checkpoint')
     group.add_argument('--end', type=int, required=True, help='End checkpoint')
+    group.add_argument('--include_intermediate', action='store_true', help='Include intermediate checkpoints')
     group.add_argument('--batch_size', type=int, default=1)
     group.add_argument('--n', type=int,nargs='+', default=[2], help='n-grams to gather data for')
     
@@ -113,52 +113,59 @@ def parse_args():
     
     return parser.parse_args()
 
-def main():
-    mp.set_start_method('spawn', force=True)
-
-    args = parse_args()
-
+def collect_model_data(
+        model_name: str,
+        start: int,
+        end: int,
+        batch_size: int,
+        n: list[int],
+        db_path: Path,
+        include_intermediate: bool = False,
+        max_ds_len: int = 1024, # debug parameter
+):
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer if args.tokenizer else args.model[0])
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     # This is correct; tokenizer.vocab_size is incorrect.
     vocab_size = len(tokenizer)
 
     # Load n-gram model distributions
-    # Commented out: Disgusting hack to get around data lock
     data: dict[str | int, DataLoader] = {
-        k: DataLoader(v, batch_size=args.batch_size, shuffle=False)
-        for k, v in get_ngram_datasets(vocab_size, ngrams=args.n).items()
+        k: DataLoader(v, batch_size=batch_size, shuffle=False)
+        for k, v in get_ngram_datasets(vocab_size, ngrams=n, max_ds_len=max_ds_len).items()
     }
-    # } for _ in range(torch.cuda.device_count())]
 
-    # Inference over checkpoints
+    checkpoints = get_model_checkpoints(model_name)
+    if not checkpoints:
+        raise ValueError('No checkpoints found')
+    ranged_checkpoints = {k: v for k, v in checkpoints.items() if start <= k <= end}
+    ranged_checkpoints = dict(sorted(ranged_checkpoints.items()))
+    if not include_intermediate:
+        keys = list(ranged_checkpoints.keys())
+        ranged_checkpoints = {start: ranged_checkpoints[keys[0]], end: ranged_checkpoints[keys[-1]]}
+    print(ranged_checkpoints)
+    
+    process_datasets(ranged_checkpoints, model_name, data, vocab_size=vocab_size, db_path=db_path)
+
+    
+def main():
+    max_ds_len = 1024 # just for debugging
+    mp.set_start_method('spawn', force=True)
+
+    args = parse_args()
+    db_path = Path(args.out)
+
     model_names = args.model or get_basic_pythia_model_names()
     for model_name in model_names:
-        checkpoints = get_model_checkpoints(model_name)
-        if not checkpoints:
-            raise ValueError('No checkpoints found')
-        ranged_checkpoints = {k: v for k, v in checkpoints.items() if args.start <= k <= args.end}
-        ranged_checkpoints = dict(sorted(ranged_checkpoints.items()))
-        print(ranged_checkpoints)
-        
-        process_datasets(ranged_checkpoints, model_name, data, vocab_size=vocab_size, out=Path(args.out))
-
-def run_workers(worker, revisions: list[int] | list[str], **kwargs) -> list[dict]:
-    """Parallelise inference over model checkpoints."""
-    max_revisions_per_chunk = math.ceil(len(revisions) / torch.cuda.device_count())
-    step_indices = [
-        revisions[i : i + max_revisions_per_chunk]
-        for i in range(0, len(revisions), max_revisions_per_chunk)
-    ]
-
-    args = [
-        (i, step_indices[i], *kwargs.values())
-        for i in range(len(step_indices))
-    ]
-    print(f"Inference on revisions {step_indices}, GPU count: {len(step_indices)}")
-    with mp.Pool(len(step_indices)) as pool:
-        return pool.starmap(worker, args)
-
+        collect_model_data(
+            model_name,
+            args.start,
+            args.end,
+            args.batch_size,
+            args.n,
+            db_path,
+            args.include_intermediate,
+            max_ds_len,
+        )
 
 if __name__ == '__main__':
     main()

@@ -10,24 +10,24 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 def parse_args():
-    parser = ArgumentParser(description='Search for interesting data points between contiguous checkpoints')
-    
-    group = parser.add_argument_group("Data arguments")
-    group.add_argument('--data_path', type=str, default="test")
-    group.add_argument('--tokenizer', type=str, default="EleutherAI/pythia-70m")
-    group.add_argument('--num_shards', type=int, default=2)
-    group.add_argument('--num_samples', type=int, default=1024)
-    group.add_argument('--batch_size', type=int, default=16)
-    group.add_argument('--seq_len', type=int, default=2049)
-    group.add_argument('--n', type=int, nargs="+")
+    parser = ArgumentParser()
+    parser.add_argument('--data_path', type=str, default="test")
+    parser.add_argument('--tokenizer', type=str, default="EleutherAI/pythia-70m")
+    parser.add_argument('--num_shards', type=int, default=2)
+    parser.add_argument('--num_samples', type=int, default=1024)
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--seq_len', type=int, default=2049)
+    parser.add_argument('--n', type=int, nargs="+")
         
     return parser.parse_args()
+
 
 def float32_to_bfloat16(x):
     """Convert float32 to bfloat16 values represented as uint16."""
     x = np.asarray(x)
     x_view = x.view(np.uint32)
     return (x_view >> 16).astype(np.uint16)
+
 
 def bfloat16_to_float32(x):
     """Convert bfloat16 values represented as uint16 to float32."""
@@ -36,6 +36,7 @@ def bfloat16_to_float32(x):
         np.left_shift(x.astype(np.uint32), 16).tobytes(), 
         dtype=np.float32
     ).reshape(x.shape)
+
 
 def main():
     args = parse_args()
@@ -86,6 +87,8 @@ def main():
 
         chunk_len = batch_size * seq_len
         for i, batch in tqdm(enumerate(data_loader)):
+            if i < 13:
+                continue
             ngram_prefixes = []
             for row in batch["input_ids"]:
                 ngram_prefixes.extend(

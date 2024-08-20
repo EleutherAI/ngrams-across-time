@@ -15,7 +15,7 @@ def get_model_checkpoints(model_id):
         return None
 
     refs = response.json()
-    
+
     revisions = {}
     for branch in refs['branches']:
         if not branch['ref'].startswith('refs/heads/'):
@@ -44,42 +44,22 @@ def get_pythia_model_size(model_name: str):
         return int(size)
 
 
-def filter_basic_pythia_models(model_names: list[str]) -> list[str]:
-    basic_models = []
-    pattern = r'^EleutherAI/pythia-(\d+(?:\.\d+)?[mb])$'
-    
-    for model in model_names:
-        if re.match(pattern, model, re.IGNORECASE):
-            basic_models.append(model)
-    
-    return sorted(basic_models, key=lambda x: float(re.search(r'(\d+(?:\.\d+)?)', x).group(1))) # type: ignore
-
-
 def get_basic_pythia_model_names() -> list[str]:
     api = HfApi()
     models = api.list_models(author="EleutherAI", search="pythia")
-    basic_models = filter_basic_pythia_models([model.modelId for model in models]) # type: ignore
-
-    # Sort models by size
-    def model_size(model_id):
-        # Extract the size part from the model name
-        size_match = re.search(r'(\d+(?:\.\d+)?[mb]?)', model_id.split("-")[-1], re.IGNORECASE)
-        if not size_match:
-            return 0  # If no size found, treat it as the smallest
-        
-        size = size_match.group(1)
-        if size.lower().endswith('b'):
-            return float(size[:-1]) * 1000
-        elif size.lower().endswith('m'):
-            return float(size[:-1])
-        else:
-            return float(size)
     
-    return sorted(basic_models, key=model_size)
+    basic_models = []
+    pattern = r'^EleutherAI/pythia-(\d+(?:\.\d+)?[mb])$'
+    for model in models:
+        model_name = model.modelId # type: ignore
+        if re.match(pattern, model_name, re.IGNORECASE):
+            basic_models.append(model_name)
+    
+    return sorted(basic_models, key=get_pythia_model_size)
 
 
-def load_with_retries(model_name: str, revision: str, model_size: int):
-    for retry in range(3):
+def load_with_retries(model_name: str, revision: str, model_size: int, retries: int = 3):
+    for retry in range(retries):
         try:
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
@@ -95,6 +75,3 @@ def load_with_retries(model_name: str, revision: str, model_size: int):
                 time.sleep(2)
             else:
                 return None
-
-
-    

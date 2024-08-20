@@ -31,9 +31,12 @@ def filter_data(
     db = TensorDatabase(str(db_path / "tensor_db.sqlite"), str(db_path / "tensors"))
 
     def kl_div_delta(start: int, end: int, n: int):
-        kl_start = db.query_last(model=model, step=start, metric='kl', ngram=n)['tensor']
-        kl_end = db.query_last(model=model, step=end, metric='kl', ngram=n)['tensor']
-        return kl_start - kl_end
+        kl_start = db.query_last(model=model, step=start, metric='kl', ngram=n)
+        kl_end = db.query_last(model=model, step=end, metric='kl', ngram=n)
+        if kl_start is None or kl_end is None:
+            raise ValueError(f"Could not find KL divergence data for model {model} at steps {start} and {end}")
+        
+        return kl_start['tensor'] - kl_end['tensor']
 
     kl_delta = kl_div_delta(start, end, n=n)[:ds_len]
     higher_kl_delta = kl_div_delta(start, end, n + 1)[:ds_len]

@@ -212,3 +212,12 @@ ENV/
 # Pytorch specifics
 *.pth
 *.pt
+
+# Misc
+TODO.md
+test_tensor_db.sqlite
+test_tensors
+test
+data
+output
+prototype.py

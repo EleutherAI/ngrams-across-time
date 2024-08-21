@@ -5,11 +5,11 @@ import torch
 from torch import Tensor
 import pandas as pd
 
-from src.utils.tensor_db import TensorDatabase
+from ngrams_across_time.utils.tensor_db import TensorDatabase
 
 
 def bottom_k(matrix: Tensor, k=100):
-    values, indices = torch.topk(matrix.flatten(), k, largest=False)
+    values, indices = torch.topk(matrix.flatten(), k)
     
     rows = indices // matrix.shape[1]
     cols = indices % matrix.shape[1]

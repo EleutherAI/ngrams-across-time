@@ -9,11 +9,11 @@ from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
 from transformers import AutoTokenizer
 
-from src.language.ngram_datasets import get_ngram_datasets
-from src.language.hf_client import get_model_checkpoints, get_basic_pythia_model_names, get_pythia_model_size, load_with_retries
+from ngrams_across_time.language.ngram_datasets import get_ngram_datasets
+from ngrams_across_time.language.hf_client import get_model_checkpoints, get_basic_pythia_model_names, get_pythia_model_size, load_with_retries
 
-from src.utils.divergences import kl_divergence_log_space, js_divergence_log_space
-from src.utils.tensor_db import TensorDatabase
+from ngrams_across_time.utils.divergences import kl_divergence_log_space, js_divergence_log_space
+from ngrams_across_time.utils.tensor_db import TensorDatabase
 
 # TODO pass val and ngrams separately
 def process_datasets(

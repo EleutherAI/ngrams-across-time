@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ngrams-across-time"
 description = ""
@@ -18,17 +22,14 @@ dependencies = [
 ]
 version = "0.0.1"
 
+[tool.setuptools]
+packages = ["ngrams_across_time"]
+
 [tool.pyright]
-include = ["scripts*"]
+include = ["ngrams_across_time*"]
 reportPrivateImportUsage = false
 
 [tool.ruff]
-# Enable pycodestyle (`E`), Pyflakes (`F`), and isort (`I`) codes
-# See https://beta.ruff.rs/docs/rules/ for more possible rules
 select = ["E", "F", "I"]
-# Same as Black.
 line-length = 88
-# Avoid automatically removing unused imports in __init__.py files.
-# Such imports will be flagged with a dedicated message suggesting
-# that the import is either added to the module's __all__ symbol
 ignore-init-module-imports = true

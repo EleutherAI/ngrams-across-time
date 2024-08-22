@@ -4,7 +4,7 @@ from argparse import ArgumentParser
 import torch
 from torch import Tensor
 import pandas as pd
-
+from datasets import load_from_disk, Dataset
 from src.utils.tensor_db import TensorDatabase
 
 
@@ -43,6 +43,7 @@ def filter_data(
 
     start_loss = db.query_last(model=model, step=start, metric='loss')
     end_loss = db.query_last(model=model, step=end, metric='loss')
+    val_set: Dataset = load_from_disk("data/val_tokenized.hf").select(range(ds_len)) # type: ignore
 
     filtered = []
     # Select the sequences with the largest drops in KL divergence
@@ -53,7 +54,8 @@ def filter_data(
         if higher_kl_div_reduction <= 0 and kl_div_reduction > 0:
             data = []
             # print(f"{row} {col}: n-gram KL div: {kl_div_reduction}, higher order n-gram KL div: {higher_kl_div_reduction}")
-            data.extend([row, col, kl_div_reduction, higher_kl_div_reduction])
+            ngram = val_set[row]['input_ids'][col - n + 1: col + 1].tolist()
+            data.extend([row, (col - n + 1), col, kl_div_reduction, higher_kl_div_reduction, ngram])
             if start_loss: data.append(start_loss['tensor'][row, col].item())
             if end_loss: data.append(end_loss['tensor'][row, col].item())
 
@@ -61,11 +63,16 @@ def filter_data(
 
     df = pd.DataFrame(filtered, columns=[
          "sample_idx", 
-         "end_token_idx", 
+         "start_ngram_idx",
+         "end_ngram_idx", 
          "kl_div_reduction", 
-         "higher_order_kl_div_reduction"
-        ] + (["start_loss"] if start_loss else []
-             ) + (["end_loss"] if end_loss else [])
+         "higher_order_kl_div_reduction",
+         "ngram"
+        ] + (
+            ["start_loss"] if start_loss else []
+        ) + (
+            ["end_loss"] if end_loss else []
+        )
     )
     df.to_csv(f"filtered-{n}-gram-data-{model.replace('/', '--')}-{start}-{end}.csv", index=False)
 

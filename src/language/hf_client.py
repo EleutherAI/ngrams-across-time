@@ -1,6 +1,7 @@
 import re
 import time
 import requests
+from typing import Callable
 
 from huggingface_hub import HfApi
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
@@ -58,20 +59,26 @@ def get_basic_pythia_model_names() -> list[str]:
     return sorted(basic_models, key=get_pythia_model_size)
 
 
-def load_with_retries(model_name: str, revision: str, model_size: int, retries: int = 3):
+def with_retries(fn: Callable, retries: int = 3):
     for retry in range(retries):
         try:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype="auto",
-                revision=revision,
-                cache_dir=".cache",
-                quantization_config=BitsAndBytesConfig(load_in_4bit=True) if model_size > 6e9 else None
-            ).cuda()
-            return model
+            return fn()
         except Exception as e:
             if retry < 2:
                 print(f"Attempt {retry + 1} failed, retrying in 2 seconds...", e)
                 time.sleep(2)
             else:
                 return None
+
+
+def load_with_retries(model_name: str, revision: str, model_size: int, retries: int = 3):
+    def load():
+        return AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype="auto",
+            revision=revision,
+            cache_dir=".cache",
+            quantization_config=BitsAndBytesConfig(load_in_4bit=True) if model_size > 6e9 else None
+        ).cuda()
+
+    return with_retries(load, retries)

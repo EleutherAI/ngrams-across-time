@@ -34,11 +34,10 @@ class NgramDataset(TorchDataset):
     def bfloat16_to_float32(self, x: np.ndarray):
         """Convert bfloat16 values represented as uint16 to float32."""
         x = np.asarray(x)
-        x_float32 = np.frombuffer(
+        return np.frombuffer(
             np.left_shift(x.astype(np.uint32), 16).tobytes(), 
             dtype=np.float32
         ).reshape(x.shape)
-        return x_float32
     
     def __len__(self):
         return len(self.dataset)

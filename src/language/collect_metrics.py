@@ -74,7 +74,7 @@ def process_datasets(
                     print(f"Loader {loader} is exhausted")
     
     # Save results
-    db = TensorDatabase(str(db_path / "tensor_db.sqlite"), str(db_path / "tensors"))
+    db = TensorDatabase(str(db_path / "tensor_db"), str(db_path / "tensors"))
     for ngram, ngram_data in result.items():
         for step, metrics in ngram_data.items():
             for metric, tensor in metrics.items():
@@ -148,7 +148,7 @@ def collect_model_data(
 
     
 def main():
-    max_ds_len = 1024 # just for debugging
+    max_ds_len = 1024 # debugging parameter
     mp.set_start_method('spawn', force=True)
 
     args = parse_args()

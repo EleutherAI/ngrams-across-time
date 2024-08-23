@@ -5,9 +5,9 @@ from pathlib import Path
 from argparse import ArgumentParser
 
 
-from src.language.filter_data import filter_data
-from src.language.collect_metrics import collect_model_data
-from src.language.hf_client import get_basic_pythia_model_names
+from ngrams_across_time.language.filter_data import filter_data
+from ngrams_across_time.language.collect_metrics import collect_model_data
+from ngrams_across_time.language.hf_client import get_basic_pythia_model_names
 
 
 def parse_args():

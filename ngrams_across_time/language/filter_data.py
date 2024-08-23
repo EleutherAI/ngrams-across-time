@@ -5,7 +5,7 @@ import torch
 from torch import Tensor
 import pandas as pd
 from datasets import load_from_disk, Dataset
-from src.utils.tensor_db import TensorDatabase
+from ngrams_across_time.utils.tensor_db import TensorDatabase
 
 
 def top_k(matrix: Tensor, k=100):

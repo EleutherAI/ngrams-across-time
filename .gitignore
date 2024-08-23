@@ -221,3 +221,6 @@ test
 data
 output
 prototype.py
+*.pickle
+*.csv
+*.pkl

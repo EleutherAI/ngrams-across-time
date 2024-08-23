@@ -4,11 +4,11 @@ from argparse import ArgumentParser
 import torch
 from torch import Tensor
 import pandas as pd
-
+from datasets import load_from_disk, Dataset
 from ngrams_across_time.utils.tensor_db import TensorDatabase
 
 
-def bottom_k(matrix: Tensor, k=100):
+def top_k(matrix: Tensor, k=100):
     values, indices = torch.topk(matrix.flatten(), k)
     
     rows = indices // matrix.shape[1]
@@ -28,7 +28,7 @@ def filter_data(
     # Arbitrarily chosen hyperparameter
     k = 2048
 
-    db = TensorDatabase(str(db_path / "tensor_db.sqlite"), str(db_path / "tensors"))
+    db = TensorDatabase(str(db_path / "tensor_db"), str(db_path / "tensors"))
 
     def kl_div_delta(start: int, end: int, n: int):
         kl_start = db.query_last(model=model, step=start, metric='kl', ngram=n)
@@ -41,23 +41,40 @@ def filter_data(
     kl_delta = kl_div_delta(start, end, n=n)[:ds_len]
     higher_kl_delta = kl_div_delta(start, end, n + 1)[:ds_len]
 
+    start_loss = db.query_last(model=model, step=start, metric='loss')
+    end_loss = db.query_last(model=model, step=end, metric='loss')
+    val_set: Dataset = load_from_disk("data/val_tokenized.hf").select(range(ds_len)) # type: ignore
+
     filtered = []
     # Select the sequences with the largest drops in KL divergence
-    for (row, col, kl_div_diff) in bottom_k(kl_delta, k):
-        higher_kl_div_diff = higher_kl_delta[row, col].item()
+    for (row, col, kl_div_reduction) in top_k(kl_delta, k):
+        higher_kl_div_reduction = higher_kl_delta[row, col].item()
 
         # Filter to items where the next highest order n-gram's KL divergence doesn't drop
-        if higher_kl_div_diff >= 0 and kl_div_diff < 0:
-            print(f"{row} {col}: n-gram KL div: {kl_div_diff}, higher order n-gram KL div: {higher_kl_div_diff}")
-            filtered.append((row, col, kl_div_diff, higher_kl_div_diff))
+        if higher_kl_div_reduction <= 0 and kl_div_reduction > 0:
+            data = []
+            # print(f"{row} {col}: n-gram KL div: {kl_div_reduction}, higher order n-gram KL div: {higher_kl_div_reduction}")
+            ngram = val_set[row]['input_ids'][col - n + 1: col + 1].tolist()
+            data.extend([row, (col - n + 1), col, kl_div_reduction, higher_kl_div_reduction, ngram])
+            if start_loss: data.append(start_loss['tensor'][row, col].item())
+            if end_loss: data.append(end_loss['tensor'][row, col].item())
+
+            filtered.append(data)
 
     df = pd.DataFrame(filtered, columns=[
          "sample_idx", 
-         "end_token_idx", 
-         "kl_div_change", 
-         "higher_order_kl_div_change"
-        ])
-    df.to_csv(f"filtered-{n}-gram-data-{model.replace('/', '--')}.csv", index=False)
+         "start_ngram_idx",
+         "end_ngram_idx", 
+         "kl_div_reduction", 
+         "higher_order_kl_div_reduction",
+         "ngram"
+        ] + (
+            ["start_loss"] if start_loss else []
+        ) + (
+            ["end_loss"] if end_loss else []
+        )
+    )
+    df.to_csv(f"filtered-{n}-gram-data-{model.replace('/', '--')}-{start}-{end}.csv", index=False)
 
 
 def parse_args():

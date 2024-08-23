@@ -1,6 +1,7 @@
 from pathlib import Path
 from argparse import ArgumentParser
 import os
+import time
 
 import numpy as np
 from tokengrams import ShardedInMemoryIndex
@@ -11,7 +12,7 @@ from tqdm import tqdm
 
 def parse_args():
     parser = ArgumentParser()
-    parser.add_argument('--data_path', type=str, default="test")
+    parser.add_argument('--data_path', type=str, default="data")
     parser.add_argument('--tokenizer', type=str, default="EleutherAI/pythia-70m")
     parser.add_argument('--num_shards', type=int, default=2)
     parser.add_argument('--num_samples', type=int, default=1024)
@@ -61,8 +62,9 @@ def main():
         for sa_fp, t_fp in zip(sorted(tokens_path.iterdir()), sorted(sa_path.glob('*.idx')))
     ]
 
+    start = time.time()
     index = ShardedInMemoryIndex(tokengrams_paths[:num_shards], vocab_size)
-    print(f"Loaded index with {num_shards} shards...")
+    print(f"Loaded index with {num_shards} shards in {time.time() - start}s...")
 
     data: Dataset = load_from_disk(str(Path('data') / "val_tokenized.hf")) # type: ignore
     data = data.select(range(num_samples))
@@ -72,9 +74,6 @@ def main():
 
         data_loader = DataLoader(data, batch_size) # type: ignore
 
-        if os.path.exists(data_path / f"smoothed-{n}-gram-pile-dists-bf16-{num_shards}_shards.npy"):
-            print(f"Skipping {n}-gram")
-            continue
         file_path = data_path / f"smoothed-{n}-gram-pile-dists-bf16-{num_shards}_shards.npy"
         mode = "w+" if not file_path.exists() else "r+"
         # Use uint16 as a bit container for truncated values which will be converted back to float32 later
@@ -87,8 +86,6 @@ def main():
 
         chunk_len = batch_size * seq_len
         for i, batch in tqdm(enumerate(data_loader)):
-            if i < 13:
-                continue
             ngram_prefixes = []
             for row in batch["input_ids"]:
                 ngram_prefixes.extend(

@@ -22,6 +22,9 @@ def parse_args():
     
     group = parser.add_argument_group("Data arguments")
     group.add_argument('--db_path', type=str, default="/mnt/ssd-1/tensor_db", help='Location to save data in SQLite database')
+
+    group = parser.add_argument_group("Debug arguments")
+    group.add_argument('--len_ds', type=int, default=1024)
     
     return parser.parse_args()
 
@@ -30,6 +33,7 @@ def main():
     args = parse_args()
     db_path = Path(args.db_path)
 
+    n_and_higher = list(set(n for arg in args.n for n in (arg, arg + 1)))
     # Collect metrics for each model checkpoint
     for model_name in args.model or get_basic_pythia_model_names():
         collect_model_data(
@@ -37,12 +41,14 @@ def main():
             args.start,
             args.end,
             args.batch_size,
-            args.n,
+            n_and_higher,
             db_path,
+            max_ds_len=args.len_ds
         )
 
-    # Use metrics to filter data to select prompts
-    filter_data(args.model, Path(args.out), start=args.start, end=args.end, n=args.n)
+        # Use metrics to filter data to select prompts
+        for n in args.n:
+            filter_data(model_name, db_path, start=args.start, end=args.end, n=n)
 
 
 if __name__ == '__main__':

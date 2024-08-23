@@ -11,8 +11,8 @@ from auto_circuit.types import PruneScores, OutputSlice
 from auto_circuit.utils.graph_utils import patchable_model
 from auto_circuit.visualize import net_viz
 
-from src.language.hf_client import with_retries
-from src.language.daat import AblationDataset, collate_fn, mask_gradient_prune_scores_daat
+from ngrams_across_time.language.hf_client import with_retries
+from ngrams_across_time.language.daat import AblationDataset, collate_fn, mask_gradient_prune_scores_daat
 
 
 def main():

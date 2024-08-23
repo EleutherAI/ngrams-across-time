@@ -1,10 +1,12 @@
 from pathlib import Path
 from argparse import ArgumentParser
 
+from attr import Out
 import torch
 from torch import Tensor
 import pandas as pd
 from datasets import load_from_disk, Dataset
+from transformers import AutoTokenizer
 from src.utils.tensor_db import TensorDatabase
 
 
@@ -17,7 +19,7 @@ def top_k(matrix: Tensor, k=100):
     return list(zip(rows.tolist(), cols.tolist(), values.tolist()))
 
 
-def filter_data(
+def filter_ngrams(
         model: str,
         db_path: Path,
         start: int,
@@ -25,6 +27,7 @@ def filter_data(
         n: int,
         ds_len: int = 1024,
 ): 
+    """Use pre-computed KL divergence data to filter to n-grams that are learned between two checkpoints."""
     # Arbitrarily chosen hyperparameter
     k = 2048
 
@@ -45,6 +48,8 @@ def filter_data(
     end_loss = db.query_last(model=model, step=end, metric='loss')
     val_set: Dataset = load_from_disk("data/val_tokenized.hf").select(range(ds_len)) # type: ignore
 
+    tokenizer = AutoTokenizer.from_pretrained(model)
+
     filtered = []
     # Select the sequences with the largest drops in KL divergence
     for (row, col, kl_div_reduction) in top_k(kl_delta, k):
@@ -55,7 +60,8 @@ def filter_data(
             data = []
             # print(f"{row} {col}: n-gram KL div: {kl_div_reduction}, higher order n-gram KL div: {higher_kl_div_reduction}")
             ngram = val_set[row]['input_ids'][col - n + 1: col + 1].tolist()
-            data.extend([row, (col - n + 1), col, kl_div_reduction, higher_kl_div_reduction, ngram])
+            ngram_str = tokenizer.decode(ngram)
+            data.extend([row, (col - n + 1), col, kl_div_reduction, higher_kl_div_reduction, ngram, ngram_str])
             if start_loss: data.append(start_loss['tensor'][row, col].item())
             if end_loss: data.append(end_loss['tensor'][row, col].item())
 
@@ -67,7 +73,8 @@ def filter_data(
          "end_ngram_idx", 
          "kl_div_reduction", 
          "higher_order_kl_div_reduction",
-         "ngram"
+         "ngram",
+         "ngram_str"
         ] + (
             ["start_loss"] if start_loss else []
         ) + (
@@ -94,4 +101,4 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    filter_data(args.model, Path(args.db), start=args.start, end=args.end, n=args.n)
+    filter_ngrams(args.model, Path(args.db), start=args.start, end=args.end, n=args.n)

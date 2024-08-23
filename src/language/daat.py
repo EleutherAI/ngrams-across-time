@@ -57,7 +57,7 @@ def collate_fn(batch: list[Any]) -> PromptAblationBatch:
     )
 
 class AblationDataset(Dataset):
-    def __init__(self, prompts: list[Tensor], ablation_model: PatchableModel, max_len: int = 10):
+    def __init__(self, prompts: list[Tensor], ablation_model: PatchableModel, max_len: int):
         self.prompts = prompts
         self.ablation_model = ablation_model
         self.max_len = max_len

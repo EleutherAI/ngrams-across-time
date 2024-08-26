@@ -16,7 +16,9 @@ from concept_erasure.utils import assert_type
 from ngrams_across_time.image.data_types import (
     ConceptEditedDataset,
     QuantileNormalizedDataset,
-    MatchedEditedDataset
+    MatchedEditedDataset,
+    IndependentCoordinateSampler,
+    GaussianMixture,
 )
 
 def get_model_path(model_name: str, dataset_name: str, chkpt: int) -> str:
@@ -48,19 +50,14 @@ def infer_columns(feats):
     assert len(img_cols) == 1 and len(label_cols) == 1
     return img_cols[0], label_cols[0]
 
-
-def prepare_dataset(dataset_str: str, ce_type: Literal['got','qn']):
+def dataset_to_ce(dataset: DatasetDict, dataset_name: str, ce_type: Literal['got','qn']):
     seed = 42
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-    path, _, name = dataset_str.partition(":")
-    ds = load_dataset(path, name or None)
-    assert isinstance(ds, DatasetDict)
-
-    img_col, label_col = infer_columns(ds["train"].features)
-    labels = ds["train"].features[label_col].names
-    print(f"Classes in '{dataset_str}': {labels}")
+    img_col, label_col = infer_columns(dataset['train'].features)
+    labels = dataset['train'].features[label_col].names
+    print(f"Classes in dataset: {labels}")
 
     def preprocess(batch):
         transform = T.Compose([
@@ -72,14 +69,14 @@ def prepare_dataset(dataset_str: str, ce_type: Literal['got','qn']):
             'label': torch.tensor(batch[label_col]),
         }
 
-    ds = ds.with_transform(preprocess)
+    dataset = dataset.with_transform(preprocess)
 
     # Infer the image size from the first image
-    example = ds["train"][0]['pixel_values']
+    example = dataset["train"][0]['pixel_values']
     c, h, w = example.size()
     print(f"Image size: {h} x {w}")
 
-    train = ds["train"].with_format("torch")
+    train = dataset["train"].with_format("torch")
     X = assert_type(Tensor, train[img_col]).div(255)
     Y = assert_type(Tensor, train[label_col])
 
@@ -89,17 +86,20 @@ def prepare_dataset(dataset_str: str, ce_type: Literal['got','qn']):
     print("Done.")
 
     # Use the validation set if available, otherwise split the test set
-    if val := ds.get("validation"):
-        test = ds["test"].with_transform(preprocess) if "test" in ds else None
+    if val := dataset.get("validation"):
+        test = dataset["test"].with_transform(preprocess) if "test" in dataset else None
         val = val.with_transform(preprocess)
     else:
-        nontrain = ds["test"].train_test_split(train_size=1024, seed=seed)
+        nontrain = dataset["test"].train_test_split(train_size=1024, seed=seed)
         val = nontrain["train"].with_transform(preprocess)
         test = nontrain["test"].with_transform(preprocess)
 
     class_probs = torch.bincount(Y).float()
+    gaussian = GaussianMixture(
+        class_probs, len(val), means=fitter.mean_x.cpu(), covs=fitter.sigma_xx.cpu(), shape=(c, h, w)
+    )
 
-    cache = Path.cwd() / "editor-cache" / f"{dataset_str}.pkl"
+    cache = Path.cwd() / "editor-cache" / f"{dataset_name}.pkl"
     if cache.exists():
         with open(cache, "rb") as f:
             editor = pickle.load(f)
@@ -117,9 +117,20 @@ def prepare_dataset(dataset_str: str, ce_type: Literal['got','qn']):
         Y = assert_type(Tensor, val[label_col])
 
     val_sets = {
+        "ics_dataset": IndependentCoordinateSampler(class_probs, normalizer, len(val)),
         "got_dataset": ConceptEditedDataset(class_probs, editor, X, Y),
+        "gauss_dataset": gaussian,
         "normal_dataset": val,
         "qn_dataset": QuantileNormalizedDataset(class_probs, normalizer, X, Y),
     }
 
     return MatchedEditedDataset(**val_sets, ce_type=ce_type)
+
+def prepare_dataset(dataset_str: str, ce_type: Literal['got','qn']):
+
+
+    path, _, name = dataset_str.partition(":")
+    ds = load_dataset(path, name or None)
+    assert isinstance(ds, DatasetDict)
+
+    return dataset_to_ce(ds, dataset_str, ce_type)

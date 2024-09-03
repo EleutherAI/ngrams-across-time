@@ -31,6 +31,23 @@ def get_model_checkpoints(model_id):
     return revisions
 
 
+def get_closest_checkpoint(revisions: dict[int, str], target_step: int):
+    steps = sorted(revisions.keys())
+    if not steps:
+        return None
+    
+    closest = steps[0]
+    min_diff = abs(target_step - closest)
+    
+    for step in steps:
+        diff = abs(target_step - step)
+        if diff < min_diff:
+            min_diff = diff
+            closest = step
+    
+    return closest
+
+
 def get_pythia_model_size(model_name: str): 
     match = re.search(r'(\d+(?:\.\d+)?[mb]?)', model_name.split("-")[-1], re.IGNORECASE)
     if not match:

@@ -57,16 +57,15 @@ def collate_fn(batch: list[Any]) -> PromptAblationBatch:
     )
 
 class AblationDataset(Dataset):
-    def __init__(self, prompts: list[Tensor], ablation_model: PatchableModel, max_len: int):
+    def __init__(self, prompts: list[Tensor], ablation_model: PatchableModel):
         self.prompts = prompts
         self.ablation_model = ablation_model
-        self.max_len = max_len
 
     def __len__(self):
         return len(self.prompts)
 
     def __getitem__(self, idx) -> PromptAblationItem:
-        prompt = self.prompts[idx][-self.max_len:].cuda()
+        prompt = self.prompts[idx].cuda()
         return PromptAblationItem(
             prompt,
             src_ablations(self.ablation_model, prompt, ablation_type=AblationType.RESAMPLE),
@@ -89,7 +88,6 @@ def mask_gradient_prune_scores_daat(
     Args:
         model: The model to find the circuit for.
         dataloader: The dataloader to use for input.
-        official_edges: Not used.
         grad_function: Function to apply to the logits before taking the gradient.
         answer_function: Loss function of the model output which the gradient is taken
             with respect to.

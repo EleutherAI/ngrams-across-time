@@ -160,7 +160,7 @@ class MatchedEditedDataset:
     got_dataset: ConceptEditedDataset
     ics_dataset: IndependentCoordinateSampler
     gauss_dataset: GaussianMixture
-    ce_type: Literal["got", "qn", "synthetic"]
+    return_type: Literal["edited", "synthetic"]
 
     def post_init(self):
         assert len(self.normal_dataset) == len(self.qn_dataset) == len(self.ce_dataset)
@@ -170,22 +170,18 @@ class MatchedEditedDataset:
             normal_dataset=self.normal_dataset.select(idx),
             qn_dataset=self.qn_dataset.select(idx),
             got_dataset=self.got_dataset.select(idx),
-            ce_type=self.ce_type,
+            return_type=self.return_type,
             ics_dataset=self.ics_dataset.select(idx),
             gauss_dataset=self.gauss_dataset.select(idx)
         )
 
     def __getitem__(self, idx: int):
-        if self.ce_type == "got":
-            return self.normal_dataset[idx], self.got_dataset[idx]
-        elif self.ce_type == "qn":
-            return self.normal_dataset[idx], self.qn_dataset[idx]
-        elif self.ce_type == "ics":
-            return self.normal_dataset[idx], self.ics_dataset[idx]
-        elif self.ce_type == "gauss":
-            return self.normal_dataset[idx], self.gauss_dataset[idx]
+        if self.return_type == "edited":
+            return self.normal_dataset[idx], self.qn_dataset[idx], self.got_dataset[idx]
+        elif self.return_type == "synthetic":
+            return self.normal_dataset[idx], self.ics_dataset[idx], self.gauss_dataset[idx]
         else:
-            raise ValueError(f"Unknown ce_type: {self.ce_type}")
+            raise ValueError(f"Unknown return type: {self.return_type}")
     
     def __len__(self) -> int:
         return len(self.normal_dataset)

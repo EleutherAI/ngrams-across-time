@@ -29,9 +29,9 @@ def get_available_checkpoints(model_name: str, dataset_name: str) -> List[int]:
     base_path = Path(f'/mnt/ssd-1/lucia/features-across-time/img-ckpts/{dataset_name}/{model_name}')
     return [int(x.name.split('-')[-1]) for x in base_path.iterdir()]
 
-def load_models_and_dataset(model_name: str, dataset_name: str, ce_type: Literal['got','qn']):
+def load_models_and_dataset(model_name: str, dataset_name: str, return_type: Literal['edited','synthetic']):
     checkpoints = get_available_checkpoints(model_name, dataset_name)
-    dataset = prepare_dataset(dataset_name, ce_type)
+    dataset = prepare_dataset(dataset_name, return_type)
     
     def model_loader():
         for ckpt in checkpoints:
@@ -50,7 +50,7 @@ def infer_columns(feats):
     assert len(img_cols) == 1 and len(label_cols) == 1
     return img_cols[0], label_cols[0]
 
-def dataset_to_ce(dataset: DatasetDict, dataset_name: str, ce_type: Literal['got','qn']):
+def dataset_to_ce(dataset: DatasetDict, dataset_name: str, return_type: Literal['edited','synthetic']):
     seed = 42
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -58,6 +58,13 @@ def dataset_to_ce(dataset: DatasetDict, dataset_name: str, ce_type: Literal['got
     img_col, label_col = infer_columns(dataset['train'].features)
     labels = dataset['train'].features[label_col].names
     print(f"Classes in dataset: {labels}")
+
+    
+    def add_index(example, idx):
+        example['sample_idx'] = idx
+        return example
+
+    dataset = dataset.map(add_index, with_indices=True)
 
     def preprocess(batch):
         transform = T.Compose([
@@ -67,6 +74,7 @@ def dataset_to_ce(dataset: DatasetDict, dataset_name: str, ce_type: Literal['got
         return {
             'pixel_values': [transform(x) for x in batch[img_col]],
             'label': torch.tensor(batch[label_col]),
+            'sample_idx': torch.tensor(batch['sample_idx']),
         }
 
     dataset = dataset.with_transform(preprocess)
@@ -124,13 +132,13 @@ def dataset_to_ce(dataset: DatasetDict, dataset_name: str, ce_type: Literal['got
         "qn_dataset": QuantileNormalizedDataset(class_probs, normalizer, X, Y),
     }
 
-    return MatchedEditedDataset(**val_sets, ce_type=ce_type)
+    return MatchedEditedDataset(**val_sets, return_type=return_type)
 
-def prepare_dataset(dataset_str: str, ce_type: Literal['got','qn']):
+def prepare_dataset(dataset_str: str, return_type: Literal['edited','synthetic']):
 
 
     path, _, name = dataset_str.partition(":")
     ds = load_dataset(path, name or None)
     assert isinstance(ds, DatasetDict)
 
-    return dataset_to_ce(ds, dataset_str, ce_type)
+    return dataset_to_ce(ds, dataset_str, return_type)

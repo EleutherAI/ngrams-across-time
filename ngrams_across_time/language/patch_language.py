@@ -22,10 +22,10 @@ def main():
     n = 2
     max_seq_len = 10
 
-    ngrams_dataset_name = "data/val_tokenized.hf"
+    ngrams_dataset_name = "/mnt/ssd-1/lucia/ngrams-across-time/data/val_tokenized.hf"
     dataset = load_from_disk(ngrams_dataset_name)
 
-    prompts_dataset_name = f"filtered-{n}-gram-data-{model_name.replace('/', '--')}.csv"
+    prompts_dataset_name = f"/mnt/ssd-1/lucia/ngrams-across-time/filtered-{n}-gram-data-{model_name.replace('/', '--')}.csv"
     if not Path(prompts_dataset_name).exists():
         # TODO generate prompts dataset here
         f"Prompt dataset not found - use select_language_prompts.py to generate."

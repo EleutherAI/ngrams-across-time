@@ -15,25 +15,37 @@ def filter_data(
         dataset: str,
         ce_type: Literal['got', 'qn'],
 ): 
-    # Arbitrarily chosen hyperparameter
+    # Arbitrarily chosen percentile cutoff
     p = 0.2
 
     db = TensorDatabase(str(db_path / "tensor_db.sqlite"), str(db_path / "tensors"))
 
+    metric = f"kl_{ce_type}"
+
     def kl_div_delta(start: int, end: int):
-        kl_start = db.query_last(model=model, step=start, metric='kl', dataset=dataset, ce_type=ce_type)
-        kl_end = db.query_last(model=model, step=end, metric='kl', dataset=dataset, ce_type=ce_type)
+        kl_start = db.query_last(model=model, step=start, metric=metric, dataset=dataset)
+        kl_end = db.query_last(model=model, step=end, metric=metric, dataset=dataset)
+        loss_start = db.query_last(model=model, step=start, metric='ce', dataset=dataset)
+        loss_end = db.query_last(model=model, step=end, metric='ce', dataset=dataset)
         if kl_start is None or kl_end is None:
             raise ValueError(f"Could not find KL divergence data for model {model} at steps {start} and {end}, dataset {dataset}, ce_type {ce_type}")
-        
-        return torch.stack([kl_start['tensor'][:, 0], kl_start['tensor'][:, 1] - kl_end['tensor'][:, 1], kl_start['tensor'][:, 1], kl_end['tensor'][:, 1]], dim=1)
+        return torch.stack([
+            kl_start['tensor'][:, 0],
+            kl_start['tensor'][:, 1] - kl_end['tensor'][:, 1], 
+            kl_start['tensor'][:, 1], 
+            kl_end['tensor'][:, 1],
+            loss_start['tensor'][:, 1], 
+            loss_end['tensor'][:, 1]
+            ], dim=1)
 
     kl_delta = kl_div_delta(start, end)
 
-    cut_point_diff = torch.quantile(kl_delta[:, 1], 1-p)
-    end_cut_point = torch.quantile(kl_delta[:, 3], p)
+    filtered = kl_delta[kl_delta[:, 4] > kl_delta[:, 5]] # End loss should be lower than start loss
 
-    filtered = kl_delta[kl_delta[:, 1] > cut_point_diff]
+    cut_point_diff = torch.quantile(filtered[:, 1], 1-p)
+    end_cut_point = torch.quantile(filtered[:, 3], p)
+
+    filtered = filtered[filtered[:, 1] > cut_point_diff]
     filtered = filtered[filtered[:, 3] < end_cut_point]
 
     print(f"Cut points: diff {cut_point_diff:.2f}, end {end_cut_point:.2f},\
@@ -44,14 +56,19 @@ def filter_data(
     sorted_indices = torch.argsort(filtered[:, 1], descending=True)
     filtered = filtered[sorted_indices]
 
+    image_hashes = db.query_last(model=model, step=start, metric='image_hashes', dataset=dataset)['tensor']
+    
     df = pd.DataFrame(filtered, columns=[
          "sample_idx", 
          "kl_div_change",
          "start_kl_div",
          "end_kl_div",
+         'start_loss',
+         'end_loss'
         ])
     df['sample_idx'] = df['sample_idx'].astype(int)
-    df.to_csv(f"filtered-{dataset}-data-{model.replace('/', '--')}-{start}-{end}.csv", index=False)
+    df['image_hash'] = [image_hashes[int(idx)].item() for idx in df['sample_idx']]
+    df.to_csv(f"filtered-{dataset}-data-{model.replace('/', '--')}-{start}-{end}-{ce_type}.csv", index=False)
 
 
 def parse_args():

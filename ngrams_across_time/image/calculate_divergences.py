@@ -1,6 +1,7 @@
 from pathlib import Path
 import argparse
 import pdb
+import hashlib
 
 import torch
 from torch.utils.data import DataLoader
@@ -13,41 +14,91 @@ from ngrams_across_time.utils.tensor_db import TensorDatabase
 from ngrams_across_time.utils.divergences import kl_divergence_log_space, js_divergence_log_space
 from ngrams_across_time.utils.utils import assert_type
 
-def calculate_divergences(model, dataloader, device):
-    kl_divs = []
-    js_divs = []
+def image_hash(image_tensor, num_bits=32):
+    hash_hex = hashlib.md5(image_tensor.numpy().tobytes()).hexdigest()
+    return int(hash_hex[:num_bits//6], 16)
+
+def calculate_divergences(model, dataloader, device, db, step):
+    kl_divs_qn = []
+    js_divs_qn = []
+    ce_losses = []
+    kl_divs_got = []
+    js_divs_got = []
     
     model.eval()
 
     ds_index = 0
+    image_hashes = []
+    
     with torch.no_grad():
-        for norm_batch, edited_batch in dataloader:
+        for norm_batch, qn_batch, got_batch in dataloader:
             batch_size = norm_batch['pixel_values'].shape[0]
 
             x_normal, y_normal = norm_batch['pixel_values'].to(device), norm_batch['label'].to(device)
-            x_edited, y_edited = edited_batch['pixel_values'].to(device), edited_batch['label'].to(device)
+            x_qn, _ = qn_batch['pixel_values'].to(device), qn_batch['label'].to(device)
+            x_got, _ = got_batch['pixel_values'].to(device), got_batch['label'].to(device)
             
-            # Original classification
             logits_orig = model(x_normal).logits
-            logits_edited = model(x_edited).logits
+            logits_qn = model(x_qn).logits
+            logits_got = model(x_got).logits
             
-            kl_div = kl_divergence_log_space(logits_orig, logits_edited)
-            js_div = js_divergence_log_space(logits_orig, logits_edited)
+            kl_div_qn = kl_divergence_log_space(logits_orig, logits_qn)
+            js_div_qn = js_divergence_log_space(logits_orig, logits_qn)
 
-            kl_divs.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), kl_div.cpu()], dim=1))
-            js_divs.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), js_div.cpu()], dim=1))
+            kl_div_got = kl_divergence_log_space(logits_orig, logits_got)
+            js_div_got = js_divergence_log_space(logits_orig, logits_got)
+
+            ce_loss = torch.nn.functional.cross_entropy(logits_orig, y_normal, reduction='none')
+
+            kl_divs_qn.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), kl_div_qn.cpu()], dim=1))
+            js_divs_qn.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), js_div_qn.cpu()], dim=1))
+            kl_divs_got.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), kl_div_got.cpu()], dim=1))
+            js_divs_got.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), js_div_got.cpu()], dim=1))
+
+            ce_losses.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), ce_loss.cpu()], dim=1))
             ds_index += batch_size
-    
-    kl_divs = torch.cat(kl_divs, dim=0)
-    js_divs = torch.cat(js_divs, dim=0)
+            
+            batch_hashes = [image_hash(img) for img in norm_batch['pixel_values']]
+            image_hashes.extend(batch_hashes)
+        
+    kl_divs_qn = torch.cat(kl_divs_qn, dim=0)
+    js_divs_qn = torch.cat(js_divs_qn, dim=0)
+    kl_divs_got = torch.cat(kl_divs_got, dim=0)
+    js_divs_got = torch.cat(js_divs_got, dim=0)
+    ce_losses = torch.cat(ce_losses, dim=0)
 
-    return kl_divs, js_divs
+    # Save image_hashes along with other metrics
+    tags = {
+        'model': args.model,
+        'dataset': args.dataset,
+        'step': step,
+        'metric': 'kl_qn',
+        'dataset': args.dataset,
+        'return_type': 'edited'
+    }
+    db.add_tensor(kl_divs_qn, tags)
+    
+    tags['metric'] = 'js_qn'
+    db.add_tensor(js_divs_qn, tags)
+
+    tags['metric'] = 'kl_got'
+    db.add_tensor(kl_divs_got, tags)
+
+    tags['metric'] = 'js_got'
+    db.add_tensor(js_divs_got, tags)
+
+    tags['metric'] = 'ce'
+    db.add_tensor(ce_losses, tags)
+    
+    tags['metric'] = 'image_hashes'
+    db.add_tensor(torch.tensor(image_hashes, dtype=torch.int32), tags)
+
 
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load model and dataset
-    model_iterator, dataset = load_models_and_dataset(args.model, args.dataset, args.ce_type)
+    model_iterator, dataset = load_models_and_dataset(args.model, args.dataset, "edited")
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
     # Initialize TensorDatabase
@@ -58,22 +109,7 @@ def main(args):
         print(f"Processing step {step}")
 
         # Calculate divergences
-        kl_divs, js_divs = calculate_divergences(model, dataloader, device)
-        
-        # Save results in TensorDatabase
-        tags = {
-            'model': args.model,
-            'dataset': args.dataset,
-            'step': step,
-            'metric': 'kl',
-            'dataset': args.dataset,
-            'ce_type': args.ce_type
-        }
-        db.add_tensor(kl_divs, tags)
-        
-        tags['metric'] = 'js'
-        db.add_tensor(js_divs, tags)
-    
+        calculate_divergences(model, dataloader, device, db, step)
     db.close()
 
 if __name__ == "__main__":
@@ -84,7 +120,6 @@ if __name__ == "__main__":
     parser.add_argument("--start_step", type=int, default=0, help="Starting step")
     parser.add_argument("--end_step", type=int, default=1024, help="Ending step")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for dataloader")
-    parser.add_argument("--ce_type", type=str, default="qn", help="Concept editing type")
     
     args = parser.parse_args()
     main(args)

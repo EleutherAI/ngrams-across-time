@@ -1,7 +1,8 @@
 from pathlib import Path
 from argparse import ArgumentParser
+import pickle
 
-from attr import Out
+import numpy as np
 import torch
 from torch import Tensor
 import pandas as pd
@@ -19,6 +20,7 @@ def top_k(matrix: Tensor, k=100):
     return list(zip(rows.tolist(), cols.tolist(), values.tolist()))
 
 
+# TODO filter against lower order n-grams if they exist
 def filter_ngrams(
         model: str,
         db_path: Path,
@@ -83,6 +85,37 @@ def filter_ngrams(
     )
     df.to_csv(f"filtered-{n}-gram-data-{model.replace('/', '--')}-{start}-{end}.csv", index=False)
 
+    # TODO add random other n-grams with tokens sampled from the unigram and ending in the same token
+    bigrams_path = "/mnt/ssd-1/lucia/features-across-time/data/pile-deduped/bigrams.pkl"
+    with open(bigrams_path, "rb") as f:
+        bigram_counts = pickle.load(f).toarray().astype(np.float32)
+        unigram_counts = torch.tensor(bigram_counts).sum(dim=1).cuda()
+        del bigram_counts
+
+    ngram_data = {
+        'clean': [],
+        'corrupt': []
+    }
+    unique_ngrams = list(set(tuple(x) for x in df['ngram']))
+    num_samples = 100
+    for unique_ngram in unique_ngrams:
+        end_token = torch.tensor(unique_ngram[-1], device='cuda')
+        start_tokens = torch.multinomial(unigram_counts, (n - 1) * num_samples, replacement=True)
+        # TODO could select these to be n-grams that aren't learned between checkpoints
+        corrupt_ngrams = torch.cat([start_tokens.view(num_samples, n - 1), end_token.repeat(num_samples, 1)], dim=1)
+        
+        ngram_data['clean'].append(unique_ngram)
+        ngram_data['corrupt'].append(corrupt_ngrams.cpu().numpy())
+
+    # create huggingface dataset where clean is each unique n-gram and corrupt is the dataset of corrupt ngrams
+    dataset_name = f"{n}-grams-{start}-{end}-{model.replace('/', '--')}"
+    dataset = Dataset.from_dict(ngram_data)
+    dataset.save_to_disk(dataset_name)
+
+    data = load_from_disk(dataset_name)
+    # Create csv that just contains the unique n-grams, their first row/col appearance, and the dataset of alternative 
+    # n-grams that end in the same token
+    
 
 def parse_args():
     parser = ArgumentParser(description='Select data points that evolve between two checkpoints')

@@ -5,7 +5,7 @@ from pathlib import Path
 from argparse import ArgumentParser
 
 
-from src.language.filter_data import filter_data
+from src.language.filter_ngrams import filter_ngrams
 from src.language.collect_metrics import collect_model_data
 from src.language.hf_client import get_basic_pythia_model_names
 
@@ -48,7 +48,7 @@ def main():
 
         # Use metrics to filter data to select prompts
         for n in args.n:
-            filter_data(model_name, db_path, start=args.start, end=args.end, n=n)
+            filter_ngrams(model_name, db_path, start=args.start, end=args.end, n=n)
 
 
 if __name__ == '__main__':

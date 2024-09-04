@@ -2,10 +2,7 @@ from pathlib import Path
 from argparse import ArgumentParser
 import pickle
 
-<<<<<<< HEAD:ngrams_across_time/language/filter_ngrams.py
-=======
 import numpy as np
->>>>>>> 6043fb9 (wip):src/language/filter_ngrams.py
 import torch
 from torch import Tensor
 import pandas as pd

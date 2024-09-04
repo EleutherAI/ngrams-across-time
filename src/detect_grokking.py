@@ -1,6 +1,7 @@
 import os
 import copy
 from pathlib import Path
+from copy import deepcopy
 
 import pandas as pd
 import torch
@@ -19,7 +20,7 @@ import plotly.io as pio
 from auto_circuit.data import PromptDataset, PromptDataLoader
 from auto_circuit.utils.graph_utils import patchable_model
 from auto_circuit.prune_algos.mask_gradient import mask_gradient_prune_scores
-from auto_circuit.types import PruneScores #, OutputSlice
+from auto_circuit.types import PruneScores, AblationType #, OutputSlice
 from auto_circuit.prune import patch_mode, run_circuits
 
 from src.utils.utils import assert_type
@@ -28,7 +29,7 @@ pio.templates['plotly'].layout.xaxis.title.font.size = 20 # type: ignore
 pio.templates['plotly'].layout.yaxis.title.font.size = 20 # type: ignore
 pio.templates['plotly'].layout.title.font.size = 30 # type: ignore
 
-TRAIN_MODEL = True
+TRAIN_MODEL = False
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -179,57 +180,58 @@ def main():
                 test_loss = loss_fn(test_logits, test_labels)
                 test_losses.append(test_loss.item())
 
-            if ((epoch+1)%checkpoint_every)==0:
+            if ((epoch + 1) % checkpoint_every) == 0:
                 checkpoint_epochs.append(epoch)
                 model_checkpoints.append(copy.deepcopy(model.state_dict()))
                 print(f"Epoch {epoch} Train Loss {train_loss.item()} Test Loss {test_loss.item()}")
 
-                # Add patching configuration
-                model.set_use_attn_result(True)
-                model.set_use_hook_mlp_in(True)
-                model.set_use_split_qkv_input(True)
+                if (epoch + 1) % (checkpoint_every * 10) == 0:
+                    # Add patching configuration
+                    model.set_use_attn_result(True)
+                    model.set_use_hook_mlp_in(True)
+                    model.set_use_split_qkv_input(True)
 
-                # Patch using earlier checkpoint or alternative prompt
-                # alternative prompt is probably similar
-                ablation_model = patchable_model(model, factorized=True, device=device, separate_qkv=True, seq_len=train_data.shape[-1])
+                    # Patch using earlier checkpoint or alternative prompt
+                    # answers = [batch.unsqueeze(dim=0) for batch in list(train_labels.unbind())]
 
-                patching_ds = PromptDataset(
-                    train_data[:-1], 
-                    train_data[1:],
-                    list(train_data[:-1, -1].unbind()), 
-                    list(train_data[1:, -1].unbind()),
-                )
-                dataloader = PromptDataLoader(patching_ds, seq_len=train_data.shape[-1], diverge_idx=0)
-                print("Calculating EAP prune scores for patching corrupt n-grams into learned n-gram")
-                edge_prune_scores: PruneScores = mask_gradient_prune_scores(
-                    model=ablation_model,
-                    dataloader=dataloader,
-                    official_edges=set(),
-                    grad_function="logit",
-                    answer_function="avg_diff",
-                    mask_val=0.0
-                )
-                breakpoint()
-                
-                # Count the loss from ablating a set number of edges
-                num_edges = 10
+                    # patching_ds = PromptDataset(train_data[:-1], train_data[1:], answers[:-1], answers[1:])
+                    # dataloader = PromptDataLoader(patching_ds, seq_len=train_data.shape[-1], diverge_idx=0)
+                    print("Calculating EAP prune scores for patching corrupt n-grams into learned n-gram")
+                    ablation_model = patchable_model(deepcopy(model), factorized=True, device=device, separate_qkv=True, seq_len=train_data.shape[-1], slice_output="last_seq")
+                    
+                    # Remove patching configuration
+                    model.set_use_attn_result(False)
+                    model.set_use_hook_mlp_in(False)
+                    model.set_use_split_qkv_input(False)
 
-                batch_logits = run_circuits(ablation_model, dataloader, [num_edges], prune_scores=edge_prune_scores)[num_edges]
-                breakpoint()
-                batch_logits = assert_type(dict, batch_logits)
+                    # Count the loss from ablating the top n edges
+                    # todo run this once for each batch
+                    # edge_prune_scores: PruneScores = mask_gradient_prune_scores(model=ablation_model, dataloader=dataloader,official_edges=set(),grad_function="logit",answer_function="avg_diff",mask_val=0.0)
+                    # num_edges = 10
+                    # logits = run_circuits(ablation_model, dataloader, [num_edges], prune_scores=edge_prune_scores, ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT)
+                    # batch_logits = list(logits.values())[0] # this key will be edges - num_edges
+                    # batch_logits = assert_type(dict, batch_logits)
 
-                # patched_loss = F.cross_entropy(list(batch_logits.values())[0], learned_ngram[-1].unsqueeze(0).to(device))
-                # unpatched_loss = F.cross_entropy(
-                #     model(learned_ngram.unsqueeze(0).to(device))[:, -1, :],
-                #     learned_ngram[-1].unsqueeze(0).to(device)
-                # )
-                loss_increase = patched_loss - unpatched_loss
-                checkpoint_ablation_loss_increases.append(loss_increase.item())                
+                    loss_increases = []
+                    answers = [batch.unsqueeze(dim=0) for batch in list(train_labels.unbind())]
 
-                # Remove patching configuration
-                model.set_use_attn_result(False)
-                model.set_use_hook_mlp_in(False)
-                model.set_use_split_qkv_input(False)
+                    patching_ds = PromptDataset(train_data[:-1], train_data[1:], answers[:-1], answers[1:])
+                    dataloader = PromptDataLoader(patching_ds, seq_len=train_data.shape[-1], diverge_idx=0)
+                    for batch in dataloader: 
+                        edge_prune_scores: PruneScores = mask_gradient_prune_scores(model=ablation_model, dataloader=dataloader,official_edges=set(),grad_function="logit",answer_function="avg_diff",mask_val=0.0)
+                        num_edges = 10
+                        logits = run_circuits(ablation_model, dataloader, [num_edges], prune_scores=edge_prune_scores, ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT)
+                        batch_logits = list(logits.values())[0] # this key will be edges - num_edges
+                        batch_logits = assert_type(dict, batch_logits)
+
+                        patched_logits = batch_logits[batch.key]
+                        unpatched_logits = model(batch.clean)[:, -1, :]
+                        patched_loss = F.cross_entropy(patched_logits.to(device).squeeze(), batch.answers.to(device).squeeze())
+                        unpatched_loss = F.cross_entropy(unpatched_logits.squeeze(), batch.answers.to(device).squeeze())
+                        loss_increases.append((patched_loss - unpatched_loss).item())
+
+                    checkpoint_ablation_loss_increases.append(np.mean(loss_increases))                
+                    print(checkpoint_ablation_loss_increases[-1])
 
 
         torch.save(
@@ -242,6 +244,7 @@ def main():
                 "train_losses": train_losses,
                 "train_indices": train_indices,
                 "test_indices": test_indices,
+                "ablation_loss_increases": checkpoint_ablation_loss_increases
             },
             PTH_LOCATION)
     if not TRAIN_MODEL:
@@ -253,6 +256,7 @@ def main():
         train_losses = cached_data['train_losses']
         train_indices = cached_data["train_indices"]
         test_indices = cached_data["test_indices"]
+        ablation_loss_increases = cached_data["ablation_loss_increases"]
 
     """## Show Model Training Statistics, Check that it groks!"""
 
@@ -264,14 +268,14 @@ def main():
     # Create the line plot
     epochs = np.arange(0, len(train_losses), 100)
     df = pd.DataFrame({
-        'Epoch': np.concatenate([epochs, epochs]),
-        'Loss': np.array([train_losses[0 : len(train_losses) : 100] + test_losses[0 : len(test_losses) : 100]]).squeeze(),
-        'Type': np.array(['Train'] * len(epochs) + ['Test'] * len(epochs)).squeeze()
+        'Epoch': np.concatenate([epochs, epochs, epochs[0 : len(epochs) : 10]]),
+        'Loss': np.array([train_losses[0 : len(train_losses) : 100] + test_losses[0 : len(test_losses) : 100] + ablation_loss_increases]).squeeze(),
+        'Type': np.array(['Train'] * len(epochs) + ['Test'] * len(epochs) + ['TrainAblation'] * int(len(epochs) // 10)).squeeze()
     })
 
-    fig = px.line(df, x='Epoch', y='Loss', color='Type', 
-                title='Training Curve for Modular Addition',
-                log_y=True)
+    df = pd.DataFrame({'Epoch': np.concatenate([epochs, epochs, epochs[0 : len(epochs) : 10]]),'Loss': np.array([train_losses[0 : len(train_losses) : 100] + test_losses[0 : len(test_losses) : 100] + ablation_loss_increases]).squeeze(),'Type': np.array(['Train'] * len(epochs) + ['Test'] * len(epochs) + ['TrainAblation'] * int(len(epochs) // 10)).squeeze()})
+
+    fig = px.line(df, x='Epoch', y='Loss', color='Type', title='Training Curve for Modular Addition',log_y=True)
 
     # Customize the layout
     fig.update_layout(

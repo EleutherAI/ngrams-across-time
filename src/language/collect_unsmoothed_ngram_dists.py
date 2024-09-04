@@ -14,6 +14,7 @@ def parse_args():
     parser = ArgumentParser()
     parser.add_argument('--data_path', type=str, default="data")
     parser.add_argument('--tokenizer', type=str, default="EleutherAI/pythia-70m")
+    parser.add_argument('--max_shards_in_memory', type=int, default=4)
     parser.add_argument('--num_shards', type=int, default=21)
     parser.add_argument('--num_samples', type=int, default=1024)
     parser.add_argument('--batch_size', type=int, default=16)
@@ -48,13 +49,19 @@ def get_shard_size(file_path):
 def main():
     debug = False
 
+    tokens_path = Path('/mnt/ssd-1/pile-ngrams-tokens')
+    sa_path = Path('/mnt/ssd-1/pile-suffix-arrays')
+    tokengrams_paths = [
+        (str(sa_fp), str(t_fp)) 
+        for sa_fp, t_fp in zip(sorted(tokens_path.iterdir()), sorted(sa_path.glob('*.idx')))
+    ]
+
     args = parse_args()
 
     data_path = Path(args.data_path)
     os.makedirs(data_path, exist_ok=True)
 
-    max_shards_in_memory = 4
-
+    max_shards_in_memory = args.max_shards_in_memory
     num_shards = args.num_shards
     num_samples = args.num_samples
     batch_size = args.batch_size
@@ -68,21 +75,28 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     # This is correct; tokenizer.vocab_size is smaller.
     vocab_size = len(tokenizer)
-    print('vocab size and alternate', vocab_size, tokenizer.vocab_size)
-
-    tokens_path = Path('/mnt/ssd-1/pile-ngrams-tokens')
-    sa_path = Path('/mnt/ssd-1/pile-suffix-arrays')
-    tokengrams_paths = [
-        (str(sa_fp), str(t_fp)) 
-        for sa_fp, t_fp in zip(sorted(tokens_path.iterdir()), sorted(sa_path.glob('*.idx')))
-    ]
 
     total_tokens = sum(get_shard_size(file_path=path[0]) for path in tokengrams_paths[:num_shards])
     print(f"Total tokens across all shards: {total_tokens}")
 
+    # Load data
     data: Dataset = load_from_disk(str(Path('data') / "val_tokenized.hf")) # type: ignore
     data = data.select(range(num_samples))
 
+    # Check if the output files already exist and remove if necessary
+    for n in args.n:
+        file_path = data_path / f"{n}-gram-pile-dists-bf16-{num_shards}_shards.npy"
+        out_file_path = data_path / f"{n}-gram-pile-dists-bf16-{num_shards}_shards-logprobs.npy"
+        
+        if args.overwrite:
+            file_path.unlink(missing_ok=True)
+            out_file_path.unlink(missing_ok=True)
+
+        if file_path.exists() and not args.cont:
+            print(f"Exiting as a file exists and cont flag not set")
+            import sys; sys.exit(1)
+
+    # Accumulate probabilities
     for i in range(0, num_shards, max_shards_in_memory):
         shard_group = tokengrams_paths[:num_shards][i:i + max_shards_in_memory]
         shard_group_size = sum(get_shard_size(path[0]) for path in shard_group)
@@ -98,15 +112,9 @@ def main():
 
             data_loader = DataLoader(data, batch_size) # type: ignore
 
-            # TODO clean up this garbage so overwrite/continuation logic isn't happening in a LOOP
+            # Use uint16 as a bit container for custom bfloat16 representation.
             file_path = data_path / f"{n}-gram-pile-dists-bf16-{num_shards}_shards.npy"
-            if args.overwrite and i == 0:
-                file_path.unlink(missing_ok=True)
             mode = "w+" if not file_path.exists() else "r+"
-            if mode == "r+" and not args.cont and i == 0:
-                print(f"Exiting as a file exists and args.cont not set")
-                import sys; sys.exit(1)
-            # Use uint16 as a bit container for truncated values which will be converted back to float32 later
             mmap = np.memmap(
                 file_path,
                 mode=mode,
@@ -114,42 +122,40 @@ def main():
                 shape=(num_samples * seq_len, vocab_size),
             )
 
-            chunk_len = batch_size * seq_len
             for i, batch in tqdm(enumerate(data_loader)):   
-                # first_example_probs_sum = bfloat16_to_float32(mmap[1]).sum()
-                # import code; code.interact(local=locals())
-                # assert abs(1 - first_example_probs_sum - shard_weight) < 0.1
-                # print(first_example_probs_sum, shard_weight)
-
                 ngram_prefixes = []
                 for row in batch["input_ids"]:
                     ngram_prefixes.extend(
                         [row[max(0, i - (n - 1)) : i].tolist() for i in range(len(row))]
                     )
 
-                counts = np.array(index.batch_count_next(ngram_prefixes), dtype=np.float32) # num rows, vocab size
+                counts = np.array(index.batch_count_next(ngram_prefixes), dtype=np.float32)
 
-                row_sums = counts.sum(axis=1, keepdims=True) # num rows, 1
-                row_sums[row_sums == 0] = 1 # avoid nans
+                row_sums = counts.sum(axis=1, keepdims=True)
+                row_sums[row_sums == 0] = 1 # Avoid nans
                 probs = counts / row_sums 
                 assert (probs >= 0).all()
                 assert (probs <= 1).all()
                 
-                mmap_slice = slice(i * chunk_len, (i * chunk_len) + chunk_len)
+                mmap_slice = slice(
+                    i * batch_size * seq_len, 
+                    (i * batch_size * seq_len) + batch_size * seq_len
+                )
 
-                # float16 precision is too low for logprobs so we use the first 16 bits of a float32 (~1% precision loss)
-                # Use uint16 as a bit container for truncated values which will be converted back to float32 later
+                # float16 precision loss is high so values are stored as a custom bfloat16 not natively supported by numpy (~1% precision loss)
+                # TODO use ml_dtypes package
                 accumulator_float32 = bfloat16_to_float32(mmap[mmap_slice]) if mmap[mmap_slice].sum() > 0 else 0
                 mmap[mmap_slice] = float32_to_bfloat16(accumulator_float32 + (probs * shard_weight))
-                assert np.isfinite(mmap[mmap_slice]).all()
                 
-                if i == 0:
-                    print("accumulated probs sum", bfloat16_to_float32(mmap[0]).sum())
+                if debug:
+                    assert np.isfinite(mmap[mmap_slice]).all()
+                    if i == 0:
+                        print("Accumulated probability sum for first entry: ", bfloat16_to_float32(mmap[0]).sum())
         
         del index
 
     for n in args.n:
-        print("Converting probs to logprobs")
+        print("Generating log probabilities from probabilities...")
 
         file_path = data_path / f"{n}-gram-pile-dists-bf16-{num_shards}_shards.npy"
         mmap = np.memmap(
@@ -172,36 +178,13 @@ def main():
             end = min(i + chunk_size, num_samples * seq_len)
             data_float32 = bfloat16_to_float32(mmap[i : end])
 
-            # Add a small epsilon to avoid log(0) 
+            # Additive smoothing to avoid log(0)
             epsilon = 1e-10
             log_probs = np.log(np.maximum(data_float32, epsilon))
             mmap_out[i:end] = float32_to_bfloat16(log_probs)
 
     print("Done!")
 
-def test():
-    n = 2
-    num_shards = 2
-    data_path = Path("test")
-    out_file_path = data_path / f"{n}-gram-pile-dists-bf16-{num_shards}_shards-logprobs.npy"
-
-    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
-    # This is correct; tokenizer.vocab_size is incorrect.
-    vocab_size = len(tokenizer)
-
-    memmap = np.memmap(
-        out_file_path,
-        mode="r",
-        dtype=np.uint16,
-        shape=(1024, 2049, vocab_size),
-    )
-
-    bfloat16_to_float32(memmap[0])
-
-    breakpoint()
-
-
 
 if __name__ == "__main__":
     main()
-    # test()

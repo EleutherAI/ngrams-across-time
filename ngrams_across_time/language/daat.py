@@ -146,7 +146,6 @@ def mask_gradient_prune_scores_daat(
                     elif answer_function == "avg_val":
                         loss = -batch_avg_answer_val(token_vals, batch)
                     elif answer_function == "mse":
-                        breakpoint()
                         loss = torch.nn.functional.mse_loss(token_vals, batch.answers)
                     else:
                         raise ValueError(f"Unknown answer_function: {answer_function}")

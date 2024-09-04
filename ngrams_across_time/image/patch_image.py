@@ -10,7 +10,7 @@ from einops import rearrange
 from ngrams_across_time.image.load_model_data import load_models_and_dataset
 from ngrams_across_time.image.data_types import QuantileNormalizedDataset, IndependentCoordinateSampler, GaussianMixture, ConceptEditedDataset
 from ngrams_across_time.image.calculate_divergences import image_hash
-from auto_circuit.utils.graph_utils import patch_mode, patchable_model
+from auto_circuit.utils.graph_utils import patch_mode, patchable_model, train_mask_mode
 from auto_circuit.utils.ablation_activations import batch_src_ablations
 from auto_circuit.data import PromptDataLoader, PromptDataset
 from auto_circuit.types import AblationType
@@ -25,9 +25,9 @@ def get_logit_diff(model, input_tensor, correct_class, target_class):
     with torch.no_grad():
         output = model(input_tensor)
     logits = output.logits
-    return ((logits[range(len(logits)), correct_class] - logits[range(len(logits)), target_class]).mean().item(), 
-            torch.nn.functional.cross_entropy(logits, correct_class.squeeze(1).to(logits.device), reduction='none').mean().item(), 
-            torch.nn.functional.cross_entropy(logits, target_class.squeeze(1).to(logits.device), reduction='none').mean().item())
+    return ((logits[range(len(logits)), correct_class] - logits[range(len(logits)), target_class]).squeeze(1).cpu().numpy(), 
+            torch.nn.functional.cross_entropy(logits, correct_class.squeeze(1).to(logits.device), reduction='none').cpu().numpy(), 
+            torch.nn.functional.cross_entropy(logits, target_class.squeeze(1).to(logits.device), reduction='none').cpu().numpy())
 
 def create_prompt_dataset_from_edited(
     edited_dataset: QuantileNormalizedDataset | IndependentCoordinateSampler | ConceptEditedDataset,
@@ -60,7 +60,6 @@ def create_prompt_dataset_from_edited(
 
 def run_experiment(model_name, dataset_name, ce_type, start_step, end_step, output_dir, patch_type, num_edges=1000):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
     return_type = 'edited' if ce_type in ['qn', 'got'] else 'synthetic'
 
     model_loader, dataset = load_models_and_dataset(model_name, dataset_name, return_type)
@@ -78,7 +77,6 @@ def run_experiment(model_name, dataset_name, ce_type, start_step, end_step, outp
         data_index_path = Path(f"data/filtered-{dataset_name}-data-{model_name.replace('/', '--')}-{start_step}-{end_step}-{ce_type}.csv")
         data_indices = pd.read_csv(data_index_path)
         
-        # Filter data
         dataset = dataset.select(data_indices['sample_idx'].tolist())
         normal = dataset.normal_dataset
         edited = dataset.qn_dataset if ce_type == 'qn' else dataset.got_dataset
@@ -88,7 +86,6 @@ def run_experiment(model_name, dataset_name, ce_type, start_step, end_step, outp
         edited = dataset.ics_dataset
 
     prompt_dataset = create_prompt_dataset_from_edited(edited, normal, img_col="pixel_values", label_col="label")
-    # Create PromptDataLoader
     ploader = PromptDataLoader(prompt_dataset, None, 0, batch_size=1, shuffle=False)
     edit_ablations = batch_src_ablations(source_model, ploader, AblationType.RESAMPLE, 'corrupt')
     clean_ablations = batch_src_ablations(source_model, ploader, AblationType.RESAMPLE, 'clean')
@@ -96,13 +93,13 @@ def run_experiment(model_name, dataset_name, ce_type, start_step, end_step, outp
     edit_only_dataset = create_prompt_dataset_from_edited(edited, edited, img_col="pixel_values", label_col="label")
     edit_only_ploader = PromptDataLoader(edit_only_dataset, None, 0, batch_size=1, shuffle=False)
     
-    # Verify hashes
     for i, sample in enumerate(dataset):
         computed_hash = image_hash(sample[0]['pixel_values'])
         if computed_hash != data_indices['image_hash'][i]:
             print(f"Mismatch at index {i}: expected {data_indices['image_hash'][i]}, got {computed_hash}")
-    # Discover circuit
-    edge_scores = subnetwork_probing_prune_scores(rec_model, edit_only_ploader, tree_optimisation=False, alternate_model=source_model, epochs=1)
+
+
+    edge_scores = subnetwork_probing_prune_scores(rec_model, edit_only_ploader, tree_optimisation=False, alternate_model=source_model, epochs=10)
 
     quantile = 0.9999
 
@@ -129,19 +126,15 @@ def run_experiment(model_name, dataset_name, ce_type, start_step, end_step, outp
         # Young model results
         source_clean_diff, source_clean_loss, source_clean_off_loss = get_logit_diff(source_model, clean_input, correct_class, target_class)
         source_corrupt_diff, source_corrupt_loss, source_corrupt_off_loss = get_logit_diff(source_model, corrupt_input, correct_class, target_class)
-        print('Young model computed')
         # Old model results
         rec_clean_diff, rec_clean_loss, rec_clean_off_loss = get_logit_diff(rec_model, clean_input, correct_class, target_class)
         rec_corrupt_diff, rec_corrupt_loss, rec_corrupt_off_loss = get_logit_diff(rec_model, corrupt_input, correct_class, target_class)
-        print('Old model computed')
         # Patched young model results
         with patch_mode(rec_model, edit_ablations[batch.key], keep_edges):
             patched_rec_corrupt_diff, patched_rec_corrupt_loss, patched_rec_corrupt_off_loss = get_logit_diff(rec_model, corrupt_input, correct_class, target_class)
-        print('Patched young model computed')
         with patch_mode(rec_model, clean_ablations[batch.key], keep_edges):
             patched_rec_clean_diff, patched_rec_clean_loss, patched_rec_clean_off_loss = get_logit_diff(rec_model, clean_input, correct_class, target_class)
-        print('Patched old model computed')
-        results.append({
+        batch_results = {
             'source_clean_diff': source_clean_diff,
             'source_corrupt_diff': source_corrupt_diff,
             'source_clean_loss': source_clean_loss,
@@ -162,10 +155,11 @@ def run_experiment(model_name, dataset_name, ce_type, start_step, end_step, outp
             'patched_rec_corrupt_off_loss': patched_rec_corrupt_off_loss,
             'patched_rec_clean_diff': patched_rec_clean_diff,
             'patched_rec_corrupt_diff': patched_rec_corrupt_diff,
-        })
+        }
 
+        results.append(pd.DataFrame(batch_results))
 
-
+    results = pd.concat(results, ignore_index=True)
     # graph_quantile = 0.99999
     # threshold = np.quantile(all_scores.cpu().numpy(), graph_quantile)
     # sankey, included_layer_count = net_viz(rec_model, rec_model.edges, edge_scores, score_threshold=threshold, vert_interval=(0, 1))
@@ -177,7 +171,7 @@ def run_experiment(model_name, dataset_name, ce_type, start_step, end_step, outp
 
     top_edges_with_scores.sort(key=lambda x: x[1], reverse=True)
 
-    return pd.DataFrame(results), top_edges_with_scores
+    return results, top_edges_with_scores
 
 def main():
     parser = ArgumentParser(description='Run DAAT experiment')

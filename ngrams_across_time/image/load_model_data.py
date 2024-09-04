@@ -126,10 +126,10 @@ def dataset_to_ce(dataset: DatasetDict, dataset_name: str, return_type: Literal[
 
     val_sets = {
         "ics_dataset": IndependentCoordinateSampler(class_probs, normalizer, len(val)),
-        "got_dataset": ConceptEditedDataset(class_probs, editor, X, Y),
+        "got_dataset": ConceptEditedDataset(class_probs, editor, X, Y, seed),
         "gauss_dataset": gaussian,
         "normal_dataset": val,
-        "qn_dataset": QuantileNormalizedDataset(class_probs, normalizer, X, Y),
+        "qn_dataset": QuantileNormalizedDataset(class_probs, normalizer, X, Y, seed),
     }
 
     return MatchedEditedDataset(**val_sets, return_type=return_type)

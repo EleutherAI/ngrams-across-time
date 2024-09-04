@@ -25,6 +25,15 @@ def calculate_divergences(model, dataloader, device, db, step):
     kl_divs_got = []
     js_divs_got = []
     
+    logit_diff_clean_correct_qnts = []
+    logit_diff_clean_correct_gots = []
+    logit_diff_qn_correct_qns = []
+    logit_diff_got_correct_gots = []
+
+    norm_labels = []
+    qn_labels = []
+    got_labels = []
+
     model.eval()
 
     ds_index = 0
@@ -35,8 +44,8 @@ def calculate_divergences(model, dataloader, device, db, step):
             batch_size = norm_batch['pixel_values'].shape[0]
 
             x_normal, y_normal = norm_batch['pixel_values'].to(device), norm_batch['label'].to(device)
-            x_qn, _ = qn_batch['pixel_values'].to(device), qn_batch['label'].to(device)
-            x_got, _ = got_batch['pixel_values'].to(device), got_batch['label'].to(device)
+            x_qn, y_qn = qn_batch['pixel_values'].to(device), qn_batch['label'].to(device)
+            x_got, y_got = got_batch['pixel_values'].to(device), got_batch['label'].to(device)
             
             logits_orig = model(x_normal).logits
             logits_qn = model(x_qn).logits
@@ -55,6 +64,16 @@ def calculate_divergences(model, dataloader, device, db, step):
             kl_divs_got.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), kl_div_got.cpu()], dim=1))
             js_divs_got.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), js_div_got.cpu()], dim=1))
 
+            logit_diff_clean_correct_qnt = logits_orig[torch.arange(batch_size), y_normal] - logits_orig[torch.arange(batch_size), y_qn]
+            logit_diff_clean_correct_got = logits_orig[torch.arange(batch_size), y_normal] - logits_orig[torch.arange(batch_size), y_got]
+            logit_diff_qn_correct_qn = logits_qn[torch.arange(batch_size), y_normal] - logits_qn[torch.arange(batch_size), y_qn]
+            logit_diff_got_correct_got = logits_got[torch.arange(batch_size), y_normal] - logits_got[torch.arange(batch_size), y_got]
+
+            logit_diff_clean_correct_qnts.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), logit_diff_clean_correct_qnt.cpu()], dim=1))
+            logit_diff_clean_correct_gots.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), logit_diff_clean_correct_got.cpu()], dim=1))
+            logit_diff_qn_correct_qns.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), logit_diff_qn_correct_qn.cpu()], dim=1))
+            logit_diff_got_correct_gots.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), logit_diff_got_correct_got.cpu()], dim=1))
+
             ce_losses.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), ce_loss.cpu()], dim=1))
             ds_index += batch_size
             
@@ -66,6 +85,10 @@ def calculate_divergences(model, dataloader, device, db, step):
     kl_divs_got = torch.cat(kl_divs_got, dim=0)
     js_divs_got = torch.cat(js_divs_got, dim=0)
     ce_losses = torch.cat(ce_losses, dim=0)
+    logit_diff_clean_correct_qnts = torch.cat(logit_diff_clean_correct_qnts, dim=0)
+    logit_diff_clean_correct_gots = torch.cat(logit_diff_clean_correct_gots, dim=0)
+    logit_diff_qn_correct_qnts = torch.cat(logit_diff_qn_correct_qns, dim=0)
+    logit_diff_got_correct_gots = torch.cat(logit_diff_got_correct_gots, dim=0)
 
     # Save image_hashes along with other metrics
     tags = {
@@ -86,6 +109,18 @@ def calculate_divergences(model, dataloader, device, db, step):
 
     tags['metric'] = 'js_got'
     db.add_tensor(js_divs_got, tags)
+
+    tags['metric'] = 'logit_diff_clean_correct_qn'
+    db.add_tensor(logit_diff_clean_correct_qnts, tags)
+
+    tags['metric'] = 'logit_diff_clean_correct_got'
+    db.add_tensor(logit_diff_clean_correct_gots, tags)
+
+    tags['metric'] = 'logit_diff_qn_correct_qn'
+    db.add_tensor(logit_diff_qn_correct_qnts, tags)
+
+    tags['metric'] = 'logit_diff_got_correct_got'
+    db.add_tensor(logit_diff_got_correct_gots, tags)
 
     tags['metric'] = 'ce'
     db.add_tensor(ce_losses, tags)

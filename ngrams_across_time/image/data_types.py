@@ -17,24 +17,42 @@ class ConceptEditedDataset:
     editor: QuadraticEditor
     X: Tensor
     Y: Tensor
+    target_Y: Tensor  # New field for pre-generated target classes
+
+    def __init__(self, class_probs: Tensor, editor: QuadraticEditor, X: Tensor, Y: Tensor, seed: Optional[int] = None, target_Y: Optional[Tensor] = None):
+        self.class_probs = class_probs
+        self.editor = editor
+        self.X = X
+        self.Y = Y
+        self.target_Y = target_Y if target_Y is not None else self._generate_target_classes(seed)
+
+    def _generate_target_classes(self, seed: Optional[int] = None):
+        if seed is not None:
+            torch.manual_seed(seed)
+        
+        target_Y = []
+        for y in self.Y:
+            loo_probs = self.class_probs.clone()
+            loo_probs[y] = 0
+            target_y = torch.multinomial(loo_probs, 1).squeeze()
+            target_Y.append(target_y)
+        
+        return torch.tensor(target_Y)
 
     def select(self, idx: List[int]):
         return ConceptEditedDataset(
             class_probs=self.class_probs,
             editor=self.editor,
             X=self.X[idx],
-            Y=self.Y[idx]
+            Y=self.Y[idx],
+            target_Y=self.target_Y[idx]
         )
 
     def __getitem__(self, idx: int) -> dict[str, Tensor]:
         x, y = self.X[idx], int(self.Y[idx])
+        target_y = int(self.target_Y[idx])
 
-        # Make sure we don't sample the correct class
-        loo_probs = self.class_probs.clone()
-        loo_probs[y] = 0
-        target_y = torch.multinomial(loo_probs, 1).squeeze()
-
-        x = self.editor.transport(x[None], y, int(target_y)).squeeze(0)
+        x = self.editor.transport(x[None], y, target_y).squeeze(0)
         return {
             "pixel_values": x,
             "label": target_y,
@@ -50,22 +68,40 @@ class QuantileNormalizedDataset:
     editor: QuantileNormalizer
     X: Tensor
     Y: Tensor
+    target_Y: Tensor  # New field for pre-generated target classes
+
+    def __init__(self, class_probs: Tensor, editor: QuantileNormalizer, X: Tensor, Y: Tensor, seed: Optional[int] = None, target_Y: Optional[Tensor] = None):
+        self.class_probs = class_probs
+        self.editor = editor
+        self.X = X
+        self.Y = Y
+        self.target_Y = target_Y if target_Y is not None else self._generate_target_classes(seed)
+
+    def _generate_target_classes(self, seed: Optional[int] = None):
+        if seed is not None:
+            torch.manual_seed(seed)
+        
+        target_Y = []
+        for y in self.Y:
+            loo_probs = self.class_probs.clone()
+            loo_probs[y] = 0
+            target_y = torch.multinomial(loo_probs, 1).squeeze()
+            target_Y.append(target_y)
+        
+        return torch.tensor(target_Y)
 
     def select(self, idx: List[int]):
         return QuantileNormalizedDataset(
             class_probs=self.class_probs,
             editor=self.editor,
             X=self.X[idx],
-            Y=self.Y[idx]
+            Y=self.Y[idx],
+            target_Y=self.target_Y[idx]
         )
 
     def __getitem__(self, idx: int) -> dict[str, Tensor]:
         x, y = self.X[idx], self.Y[idx]
-
-        # Make sure we don't sample the correct class
-        loo_probs = self.class_probs.clone()
-        loo_probs[y] = 0
-        target_y = torch.multinomial(loo_probs, 1).squeeze()
+        target_y = self.target_Y[idx]
 
         lut1 = self.editor.lut[y]
         lut2 = self.editor.lut[target_y]

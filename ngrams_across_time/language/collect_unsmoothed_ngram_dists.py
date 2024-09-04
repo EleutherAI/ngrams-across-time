@@ -83,15 +83,7 @@ def main():
     data: Dataset = load_from_disk(str(Path('data') / "val_tokenized.hf")) # type: ignore
     data = data.select(range(num_samples))
 
-    # open a timestamped log file in output
-    # from datetime import datetime
-    # os.makedirs(data_path / 'log', exist_ok=True)
-    # with open(data_path / 'log' / f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}-log-{num_shards}_shards.txt', 'w') as f:
-    #     f.write(f"Total tokens across all shards: {total_tokens})
-
     for i in range(0, num_shards, max_shards_in_memory):
-        # if i == 0:
-        #     continue
         shard_group = tokengrams_paths[:num_shards][i:i + max_shards_in_memory]
         shard_group_size = sum(get_shard_size(path[0]) for path in shard_group)
         shard_weight = shard_group_size / total_tokens
@@ -124,14 +116,10 @@ def main():
 
             chunk_len = batch_size * seq_len
             for i, batch in tqdm(enumerate(data_loader)):   
-                # Fixing the n == 2 run which is only missing the first shard group
-                # assert n == 2 and i == 0
-                # Get the missing probability weight from the first examples
                 # first_example_probs_sum = bfloat16_to_float32(mmap[1]).sum()
                 # import code; code.interact(local=locals())
                 # assert abs(1 - first_example_probs_sum - shard_weight) < 0.1
                 # print(first_example_probs_sum, shard_weight)
-                # Proceed with writing the final probabilities
 
                 ngram_prefixes = []
                 for row in batch["input_ids"]:
@@ -144,7 +132,6 @@ def main():
                 row_sums = counts.sum(axis=1, keepdims=True) # num rows, 1
                 row_sums[row_sums == 0] = 1 # avoid nans
                 probs = counts / row_sums 
-                # probs[row_sums.squeeze() == 0] = uniform_probability_row[None, :] # 1D array
                 assert (probs >= 0).all()
                 assert (probs <= 1).all()
                 

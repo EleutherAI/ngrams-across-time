@@ -6,7 +6,7 @@ from argparse import ArgumentParser
 
 
 from ngrams_across_time.language.filter_data import filter_data
-from ngrams_across_time.language.collect_metrics import collect_model_data
+from ngrams_across_time.language.collect_language_metrics import collect_model_data
 from ngrams_across_time.language.hf_client import get_basic_pythia_model_names
 
 

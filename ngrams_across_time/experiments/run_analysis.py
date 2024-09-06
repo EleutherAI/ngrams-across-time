@@ -74,7 +74,7 @@ def main():
     filter_data(
         args.model_name,
         db_path,
-        dataset,  # data is loaded inside filter_data
+        dataset,
         args.start,
         args.end,
         args.order,

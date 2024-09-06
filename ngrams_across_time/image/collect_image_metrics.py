@@ -1,38 +1,33 @@
 from pathlib import Path
-import argparse
-import pdb
-import hashlib
+from typing import List, Literal
 
 import torch
-from torch.utils.data import DataLoader
-from transformers import ConvNextV2ForImageClassification
 
-from auto_circuit.utils.graph_utils import patchable_model
-
-from ngrams_across_time.image.load_model_data import load_models_and_dataset
-from ngrams_across_time.utils.tensor_db import TensorDatabase
+from ngrams_across_time.image.image_data_types import image_hash
 from ngrams_across_time.utils.divergences import kl_divergence_log_space, js_divergence_log_space
-from ngrams_across_time.utils.utils import assert_type
 
-def image_hash(image_tensor, num_bits=32):
-    hash_hex = hashlib.md5(image_tensor.numpy().tobytes()).hexdigest()
-    return int(hash_hex[:num_bits//6], 16)
+def collect_image_losses(model, dataloader, order_index, metrics: Literal['loss'] = 'loss'):
+    model.eval()
+    device = model.device
+    losses = {metric: [] for metric in metrics}
+    with torch.no_grad():
+        for batch in dataloader:
+                batch = batch[order_index]
+                x_target, y_target = batch['pixel_values'].to(device), batch['label'].to(device)
+                logits_target = model(x_target).logits
+                losses['loss'].append(torch.nn.functional.cross_entropy(logits_target, y_target, reduction='none'))
+            
+        return {metric: torch.cat(loss_list, dim=0) for metric, loss_list in losses.items()}
+            
 
-def calculate_divergences(model, dataloader, device, db, step):
-    kl_divs_qn = []
-    js_divs_qn = []
+            
+def calculate_logit_diffs(args, model, dataloader, device, db, step):
     ce_losses = []
-    kl_divs_got = []
-    js_divs_got = []
     
     logit_diff_clean_correct_qnts = []
     logit_diff_clean_correct_gots = []
     logit_diff_qn_correct_qns = []
     logit_diff_got_correct_gots = []
-
-    norm_labels = []
-    qn_labels = []
-    got_labels = []
 
     model.eval()
 
@@ -50,19 +45,8 @@ def calculate_divergences(model, dataloader, device, db, step):
             logits_orig = model(x_normal).logits
             logits_qn = model(x_qn).logits
             logits_got = model(x_got).logits
-            
-            kl_div_qn = kl_divergence_log_space(logits_orig, logits_qn)
-            js_div_qn = js_divergence_log_space(logits_orig, logits_qn)
-
-            kl_div_got = kl_divergence_log_space(logits_orig, logits_got)
-            js_div_got = js_divergence_log_space(logits_orig, logits_got)
 
             ce_loss = torch.nn.functional.cross_entropy(logits_orig, y_normal, reduction='none')
-
-            kl_divs_qn.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), kl_div_qn.cpu()], dim=1))
-            js_divs_qn.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), js_div_qn.cpu()], dim=1))
-            kl_divs_got.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), kl_div_got.cpu()], dim=1))
-            js_divs_got.append(torch.stack([torch.arange(ds_index, ds_index + batch_size), js_div_got.cpu()], dim=1))
 
             logit_diff_clean_correct_qnt = logits_orig[torch.arange(batch_size), y_normal] - logits_orig[torch.arange(batch_size), y_qn]
             logit_diff_clean_correct_got = logits_orig[torch.arange(batch_size), y_normal] - logits_orig[torch.arange(batch_size), y_got]
@@ -95,22 +79,10 @@ def calculate_divergences(model, dataloader, device, db, step):
         'model': args.model,
         'dataset': args.dataset,
         'step': step,
-        'metric': 'kl_qn',
+        'metric': 'logit_diff_clean_correct_qn',
         'dataset': args.dataset,
         'return_type': 'edited'
     }
-    db.add_tensor(kl_divs_qn, tags)
-    
-    tags['metric'] = 'js_qn'
-    db.add_tensor(js_divs_qn, tags)
-
-    tags['metric'] = 'kl_got'
-    db.add_tensor(kl_divs_got, tags)
-
-    tags['metric'] = 'js_got'
-    db.add_tensor(js_divs_got, tags)
-
-    tags['metric'] = 'logit_diff_clean_correct_qn'
     db.add_tensor(logit_diff_clean_correct_qnts, tags)
 
     tags['metric'] = 'logit_diff_clean_correct_got'
@@ -128,33 +100,3 @@ def calculate_divergences(model, dataloader, device, db, step):
     tags['metric'] = 'image_hashes'
     db.add_tensor(torch.tensor(image_hashes, dtype=torch.int32), tags)
 
-
-def main(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Load model and dataset
-    model_iterator, dataset = load_models_and_dataset(args.model, args.dataset, "edited")
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
-
-    # Initialize TensorDatabase
-    db = TensorDatabase(str(args.data_path / "tensor_db.sqlite"), str(args.data_path / "tensors"))
-    
-    # Iterate through steps
-    for step, model in model_iterator:
-        print(f"Processing step {step}")
-
-        # Calculate divergences
-        calculate_divergences(model, dataloader, device, db, step)
-    db.close()
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Calculate divergences for concept editing")
-    parser.add_argument("--model", type=str, default='convnext-nano', help="Model name")
-    parser.add_argument("--dataset", type=str, default='cifar10', help="Dataset name")
-    parser.add_argument("--data_path", type=Path, default=Path("test_image"), help="Path to save TensorDatabase")
-    parser.add_argument("--start_step", type=int, default=0, help="Starting step")
-    parser.add_argument("--end_step", type=int, default=1024, help="Ending step")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for dataloader")
-    
-    args = parser.parse_args()
-    main(args)

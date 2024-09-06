@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 import math
 from pathlib import Path
+from typing import List, Literal
 
 from tqdm import tqdm
 import torch
@@ -14,6 +15,35 @@ from ngrams_across_time.language.hf_client import get_model_checkpoints, get_bas
 
 from ngrams_across_time.utils.divergences import kl_divergence_log_space, js_divergence_log_space
 from ngrams_across_time.utils.tensor_db import TensorDatabase
+
+def collect_language_divergences(tokenizer_model, dataloader, order_index, metrics: List[Literal['kl', 'js', 'loss']]):
+    tokenizer, model = tokenizer_model
+    model.eval()
+    device = model.device
+    divergences = {metric: [] for metric in metrics}
+    vocab_size = len(tokenizer)
+    with torch.no_grad():
+        for batch in tqdm(dataloader):
+            tokens_batch = batch[-1]['input_ids']
+            ngram_batch = batch[order_index]
+            tokens = tokens_batch.to(device)
+            logits = model(tokens).logits[:, :, :vocab_size]
+
+            if 'kl' in metrics:
+                kl_div = kl_divergence_log_space(logits, ngram_batch.to(device), dim=-1)
+                divergences['kl'].append(kl_div.detach().cpu())
+            
+            if 'js' in metrics:
+                js_div = js_divergence_log_space(logits, ngram_batch.to(device), dim=-1)
+                divergences['js'].append(js_div.detach().cpu())
+
+            if 'loss' in metrics:
+                batch_size = len(tokens)
+                loss = F.cross_entropy(logits[:, :-1].reshape(-1, vocab_size), tokens[:, 1:].reshape(-1), reduction='none')
+                divergences['loss'].append(loss.detach().cpu().reshape(batch_size, -1))
+
+    return {metric: torch.cat(div_list, dim=0) for metric, div_list in divergences.items()}
+
 
 # TODO pass val and ngrams separately
 def process_datasets(
@@ -96,23 +126,6 @@ def process_datasets(
     db.add_tensor(loss, tags)
     db.close()
 
-
-def parse_args():
-    parser = ArgumentParser(description='Search for interesting data points between contiguous checkpoints')
-    
-    group = parser.add_argument_group("Model arguments")
-    group.add_argument('--model', type=str, nargs='+', help='Model names')
-    group.add_argument('--start', type=int, required=True, help='Start checkpoint')
-    group.add_argument('--end', type=int, required=True, help='End checkpoint')
-    group.add_argument('--include_intermediate', action='store_true', help='Include intermediate checkpoints')
-    group.add_argument('--batch_size', type=int, default=1)
-    group.add_argument('--n', type=int,nargs='+', default=[2], help='n-grams to gather data for')
-    
-    group = parser.add_argument_group("Data arguments")
-    group.add_argument('--out', type=str, default="/mnt/ssd-1/tensor_db", help='Location to save data in SQLite database')
-    
-    return parser.parse_args()
-
 def collect_model_data(
         model_name: str,
         start: int,
@@ -145,27 +158,3 @@ def collect_model_data(
     print(ranged_checkpoints)
     
     process_datasets(ranged_checkpoints, model_name, data, vocab_size=vocab_size, db_path=db_path)
-
-    
-def main():
-    max_ds_len = 1024 # debugging parameter
-    mp.set_start_method('spawn', force=True)
-
-    args = parse_args()
-    db_path = Path(args.out)
-
-    model_names = args.model or get_basic_pythia_model_names()
-    for model_name in model_names:
-        collect_model_data(
-            model_name,
-            args.start,
-            args.end,
-            args.batch_size,
-            args.n,
-            db_path,
-            args.include_intermediate,
-            max_ds_len,
-        )
-
-if __name__ == '__main__':
-    main()

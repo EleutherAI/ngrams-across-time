@@ -7,15 +7,14 @@ import numpy as np
 
 from einops import rearrange
 
-from ngrams_across_time.image.load_model_data import load_models_and_dataset
-from ngrams_across_time.image.data_types import QuantileNormalizedDataset, IndependentCoordinateSampler, GaussianMixture, ConceptEditedDataset
-from ngrams_across_time.image.calculate_divergences import image_hash
-from auto_circuit.utils.graph_utils import patch_mode, patchable_model, train_mask_mode
+from ngrams_across_time.image.load_image_model_data import load_models_and_dataset
+from ngrams_across_time.image.image_data_types import QuantileNormalizedDataset, IndependentCoordinateSampler, GaussianMixture, ConceptEditedDataset
+from ngrams_across_time.image.collect_image_metrics import image_hash
+from auto_circuit.utils.graph_utils import patch_mode, patchable_model
 from auto_circuit.utils.ablation_activations import batch_src_ablations
 from auto_circuit.data import PromptDataLoader, PromptDataset
 from auto_circuit.types import AblationType
 from auto_circuit.prune_algos.subnetwork_probing import subnetwork_probing_prune_scores
-from auto_circuit.visualize import net_viz
 
 import plotly.graph_objects as go
 

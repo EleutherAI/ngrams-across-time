@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Literal, Callable, Optional
+import hashlib
 
 import torch
 from torch import Tensor
@@ -10,6 +11,9 @@ from concept_erasure import QuadraticEditor, QuadraticFitter
 from concept_erasure.quantile import QuantileNormalizer
 from concept_erasure.utils import assert_type
 
+def image_hash(image_tensor, num_bits=32):
+    hash_hex = hashlib.md5(image_tensor.numpy().tobytes()).hexdigest()
+    return int(hash_hex[:num_bits//6], 16)
 
 @dataclass
 class ConceptEditedDataset:
@@ -188,36 +192,3 @@ class GaussianMixture:
     def __len__(self) -> int:
         return self.size
 
-
-@dataclass
-class MatchedEditedDataset:
-    normal_dataset: Dataset
-    qn_dataset: QuantileNormalizedDataset
-    got_dataset: ConceptEditedDataset
-    ics_dataset: IndependentCoordinateSampler
-    gauss_dataset: GaussianMixture
-    return_type: Literal["edited", "synthetic"]
-
-    def post_init(self):
-        assert len(self.normal_dataset) == len(self.qn_dataset) == len(self.ce_dataset)
-
-    def select(self, idx: List[int]):
-        return MatchedEditedDataset(
-            normal_dataset=self.normal_dataset.select(idx),
-            qn_dataset=self.qn_dataset.select(idx),
-            got_dataset=self.got_dataset.select(idx),
-            return_type=self.return_type,
-            ics_dataset=self.ics_dataset.select(idx),
-            gauss_dataset=self.gauss_dataset.select(idx)
-        )
-
-    def __getitem__(self, idx: int):
-        if self.return_type == "edited":
-            return self.normal_dataset[idx], self.qn_dataset[idx], self.got_dataset[idx]
-        elif self.return_type == "synthetic":
-            return self.normal_dataset[idx], self.ics_dataset[idx], self.gauss_dataset[idx]
-        else:
-            raise ValueError(f"Unknown return type: {self.return_type}")
-    
-    def __len__(self) -> int:
-        return len(self.normal_dataset)

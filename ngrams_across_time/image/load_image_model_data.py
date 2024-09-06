@@ -1,6 +1,7 @@
 from typing import Tuple, List, Literal
 from pathlib import Path
 import pickle
+import os
 
 import torch
 import torchvision.transforms as T
@@ -13,13 +14,23 @@ from concept_erasure import QuadraticFitter, QuadraticEditor
 from concept_erasure.quantile import QuantileNormalizer
 from concept_erasure.utils import assert_type
 
-from ngrams_across_time.image.data_types import (
+from ngrams_across_time.image.image_data_types import (
     ConceptEditedDataset,
     QuantileNormalizedDataset,
-    MatchedEditedDataset,
     IndependentCoordinateSampler,
     GaussianMixture,
 )
+from ngrams_across_time.utils.data import MultiOrderDataset
+
+def get_available_image_models() -> List[str]:
+    base_path = Path('/mnt/ssd-1/lucia/features-across-time/img-ckpts')
+    models = []
+    for dataset in os.listdir(base_path):
+        dataset_path = base_path / dataset
+        if os.path.isdir(dataset_path):
+            for model in os.listdir(dataset_path):
+                models.append(f"{model} ({dataset})")
+    return sorted(models)
 
 def get_model_path(model_name: str, dataset_name: str, chkpt: int) -> str:
     base_path = Path(f'/mnt/ssd-1/lucia/features-across-time/img-ckpts/{dataset_name}/{model_name}')
@@ -33,15 +44,18 @@ def load_models_and_dataset(model_name: str, dataset_name: str, return_type: Lit
     checkpoints = get_available_checkpoints(model_name, dataset_name)
     dataset = prepare_dataset(dataset_name, return_type)
     
-    def model_loader():
-        for ckpt in checkpoints:
-            model_path = get_model_path(model_name, dataset_name, ckpt)
-            model = ConvNextV2ForImageClassification.from_pretrained(model_path).cuda()
-            yield ckpt, model
-            del model
-            torch.cuda.empty_cache()
+    models = {}
+    for ckpt in checkpoints:
+        model_path = get_model_path(model_name, dataset_name, ckpt)
+        model = ConvNextV2ForImageClassification.from_pretrained(model_path).cuda()
+        models[ckpt] = model
+        del model
+        torch.cuda.empty_cache()
     
-    return model_loader(), dataset
+    return models, dataset
+
+def load_models_and_synthetic_images(model_name: str, order: int, dataset_name: str):
+    return load_models_and_dataset(model_name, dataset_name, 'synthetic')
 
 def infer_columns(feats):
     from datasets import Image, ClassLabel
@@ -50,7 +64,7 @@ def infer_columns(feats):
     assert len(img_cols) == 1 and len(label_cols) == 1
     return img_cols[0], label_cols[0]
 
-def dataset_to_ce(dataset: DatasetDict, dataset_name: str, return_type: Literal['edited','synthetic']):
+def prepare_common_data(dataset: DatasetDict, dataset_name: str):
     seed = 42
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -59,12 +73,7 @@ def dataset_to_ce(dataset: DatasetDict, dataset_name: str, return_type: Literal[
     labels = dataset['train'].features[label_col].names
     print(f"Classes in dataset: {labels}")
 
-    
-    def add_index(example, idx):
-        example['sample_idx'] = idx
-        return example
-
-    dataset = dataset.map(add_index, with_indices=True)
+    dataset = dataset.map(lambda example, idx: {'sample_idx': idx}, with_indices=True)
 
     def preprocess(batch):
         transform = T.Compose([
@@ -79,7 +88,6 @@ def dataset_to_ce(dataset: DatasetDict, dataset_name: str, return_type: Literal[
 
     dataset = dataset.with_transform(preprocess)
 
-    # Infer the image size from the first image
     example = dataset["train"][0]['pixel_values']
     c, h, w = example.size()
     print(f"Image size: {h} x {w}")
@@ -93,19 +101,23 @@ def dataset_to_ce(dataset: DatasetDict, dataset_name: str, return_type: Literal[
     normalizer = QuantileNormalizer(X, Y)
     print("Done.")
 
-    # Use the validation set if available, otherwise split the test set
     if val := dataset.get("validation"):
         test = dataset["test"].with_transform(preprocess) if "test" in dataset else None
         val = val.with_transform(preprocess)
     else:
         nontrain = dataset["test"].train_test_split(train_size=1024, seed=seed)
-        val = nontrain["train"].with_transform(preprocess)
-        test = nontrain["test"].with_transform(preprocess)
+        val, test = nontrain["train"].with_transform(preprocess), nontrain["test"].with_transform(preprocess)
 
     class_probs = torch.bincount(Y).float()
-    gaussian = GaussianMixture(
-        class_probs, len(val), means=fitter.mean_x.cpu(), covs=fitter.sigma_xx.cpu(), shape=(c, h, w)
-    )
+    
+    with val.formatted_as("torch"):
+        X_val = assert_type(Tensor, val[img_col]).div(255)
+        Y_val = assert_type(Tensor, val[label_col])
+
+    return X, Y, X_val, Y_val, fitter, normalizer, class_probs, val, c, h, w, seed
+
+def get_ce_datasets(dataset: DatasetDict, dataset_name: str, return_type: Literal['edited','synthetic']):
+    X, Y, X_val, Y_val, fitter, normalizer, class_probs, val, c, h, w, seed = prepare_common_data(dataset, dataset_name)
 
     cache = Path.cwd() / "editor-cache" / f"{dataset_name}.pkl"
     if cache.exists():
@@ -113,32 +125,51 @@ def dataset_to_ce(dataset: DatasetDict, dataset_name: str, return_type: Literal[
             editor = pickle.load(f)
     else:
         print("Computing optimal transport maps...")
-
         editor = fitter.editor("cpu")
         cache.parent.mkdir(exist_ok=True)
-
         with open(cache, "wb") as f:
             pickle.dump(editor, f)
 
-    with val.formatted_as("torch"):
-        X = assert_type(Tensor, val[img_col]).div(255)
-        Y = assert_type(Tensor, val[label_col])
+    val_sets = {
+        "normal_dataset": val,
+        "qn_dataset": QuantileNormalizedDataset(class_probs, normalizer, X_val, Y_val, seed),
+        "got_dataset": ConceptEditedDataset(class_probs, editor, X_val, Y_val, seed),
+    }
+
+    return MultiOrderDataset(
+        low_order_dataset=val_sets['qn_dataset'], 
+        target_dataset=val_sets['got_dataset'], 
+        high_order_dataset=val_sets['normal_dataset'], 
+        base_dataset=val_sets['normal_dataset']
+    )
+
+def get_synthetic_datasets(dataset: DatasetDict, dataset_name: str):
+    X, Y, X_val, Y_val, fitter, normalizer, class_probs, val, c, h, w, seed = prepare_common_data(dataset, dataset_name)
+
+    gaussian = GaussianMixture(
+        class_probs, len(val), means=fitter.mean_x.cpu(), covs=fitter.sigma_xx.cpu(), shape=(c, h, w)
+    )
 
     val_sets = {
         "ics_dataset": IndependentCoordinateSampler(class_probs, normalizer, len(val)),
-        "got_dataset": ConceptEditedDataset(class_probs, editor, X, Y, seed),
         "gauss_dataset": gaussian,
         "normal_dataset": val,
-        "qn_dataset": QuantileNormalizedDataset(class_probs, normalizer, X, Y, seed),
     }
 
-    return MatchedEditedDataset(**val_sets, return_type=return_type)
+    return MultiOrderDataset(
+        low_order_dataset=val_sets['ics_dataset'], 
+        target_dataset=val_sets['gauss_dataset'], 
+        high_order_dataset=val_sets['normal_dataset'], 
+        base_dataset=val_sets['normal_dataset']
+    )
 
 def prepare_dataset(dataset_str: str, return_type: Literal['edited','synthetic']):
-
 
     path, _, name = dataset_str.partition(":")
     ds = load_dataset(path, name or None)
     assert isinstance(ds, DatasetDict)
 
-    return dataset_to_ce(ds, dataset_str, return_type)
+    if return_type == 'edited':
+        return get_ce_datasets(ds, dataset_str)
+    elif return_type == 'synthetic':
+        return get_synthetic_datasets(ds, dataset_str)

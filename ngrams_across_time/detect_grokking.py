@@ -50,7 +50,7 @@ def scatter(x, y, xaxis="", yaxis="", caxis="", renderer=None, **kwargs):
 
 def main():
     # Define the location to save the model, using a relative path
-    PTH_LOCATION = "workspace/_scratch/grokking_demo.pth"
+    PTH_LOCATION = "workspace/grokking_demo.pth"
     os.makedirs(Path(PTH_LOCATION).parent, exist_ok=True)
 
     """# Model Training
@@ -157,6 +157,7 @@ def main():
     test_losses = []
     model_checkpoints = []
     checkpoint_epochs = []
+
     checkpoint_ablation_loss_increases = []
     if TRAIN_MODEL:
         for epoch in tqdm.tqdm(range(num_epochs)):
@@ -189,7 +190,7 @@ def main():
 
                     # patching_ds = PromptDataset(train_data[:-1], train_data[1:], answers[:-1], answers[1:])
                     # dataloader = PromptDataLoader(patching_ds, seq_len=train_data.shape[-1], diverge_idx=0)
-                    print("Calculating EAP prune scores for patching corrupt n-grams into learned n-gram")
+                    print("Calculating EAP prune scores")
                     ablation_model = patchable_model(deepcopy(model), factorized=True, device=device, separate_qkv=True, seq_len=train_data.shape[-1], slice_output="last_seq")
                     
                     # Remove patching configuration
@@ -210,13 +211,14 @@ def main():
 
                     patching_ds = PromptDataset(train_data[:-1], train_data[1:], answers[:-1], answers[1:])
                     dataloader = PromptDataLoader(patching_ds, seq_len=train_data.shape[-1], diverge_idx=0)
+                    
+                    edge_prune_scores: PruneScores = mask_gradient_prune_scores(model=ablation_model, dataloader=dataloader,official_edges=set(),grad_function="logit",answer_function="avg_diff",mask_val=0.0)
+                    num_edges = 10
+                    logits = run_circuits(ablation_model, dataloader, [num_edges], prune_scores=edge_prune_scores, ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT)
+                    batch_logits = list(logits.values())[0] # this key will be edges - num_edges
+                    batch_logits = assert_type(dict, batch_logits)
+                    
                     for batch in dataloader: 
-                        edge_prune_scores: PruneScores = mask_gradient_prune_scores(model=ablation_model, dataloader=dataloader,official_edges=set(),grad_function="logit",answer_function="avg_diff",mask_val=0.0)
-                        num_edges = 10
-                        logits = run_circuits(ablation_model, dataloader, [num_edges], prune_scores=edge_prune_scores, ablation_type=AblationType.TOKENWISE_MEAN_CORRUPT)
-                        batch_logits = list(logits.values())[0] # this key will be edges - num_edges
-                        batch_logits = assert_type(dict, batch_logits)
-
                         patched_logits = batch_logits[batch.key]
                         unpatched_logits = model(batch.clean)[:, -1, :]
                         patched_loss = F.cross_entropy(patched_logits.to(device).squeeze(), batch.answers.to(device).squeeze())
@@ -320,9 +322,9 @@ def main():
     def get_metrics(model, metric_cache, metric_fn, name, reset=False):
         if reset or (name not in metric_cache) or (len(metric_cache[name]) == 0):
             metric_cache[name] = []
-            for c, sd in enumerate(tqdm.tqdm((model_checkpoints))):
+            for c, state_dict in enumerate(tqdm.tqdm((model_checkpoints))):
                 model.reset_hooks()
-                model.load_state_dict(sd)
+                model.load_state_dict(state_dict)
                 out = metric_fn(model)
                 if type(out) == Tensor:
                     out = utils.to_numpy(out)

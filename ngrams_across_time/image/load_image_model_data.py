@@ -10,6 +10,8 @@ from transformers import ConvNextV2ForImageClassification
 from datasets import load_dataset, DatasetDict
 from torch.utils.data import Dataset, DataLoader
 
+from auto_circuit.utils.graph_utils import patchable_model
+
 from concept_erasure import QuadraticFitter, QuadraticEditor
 from concept_erasure.quantile import QuantileNormalizer
 from concept_erasure.utils import assert_type
@@ -54,8 +56,17 @@ def load_models_and_dataset(model_name: str, dataset_name: str, return_type: Lit
     
     return models, dataset
 
-def load_models_and_synthetic_images(model_name: str, order: int, dataset_name: str):
-    return load_models_and_dataset(model_name, dataset_name, 'synthetic')
+def load_models_and_synthetic_images(
+        model_name: str, 
+        order: int, 
+        dataset_name: str, 
+        patchable: bool = False, 
+        device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ):
+    models, dataset = load_models_and_dataset(model_name, dataset_name, 'synthetic')
+    if patchable:
+        models = [patchable_model(model, factorized=True, device=device) for model in models]
+    return models, dataset
 
 def infer_columns(feats):
     from datasets import Image, ClassLabel

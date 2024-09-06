@@ -7,14 +7,14 @@ from torch.utils.data import Dataset as TorchDataset
 
 
 def get_ngram_datasets(vocab_size: int, ngrams: list[int], max_ds_len: int = 1024):
-    source_dataset_path = 'data/val_tokenized.hf'
+    source_dataset_path = '/mnt/ssd-1/lucia/ngrams-across-time/data/val_tokenized.hf'
     val: Dataset = load_from_disk(source_dataset_path) # type: ignore
     val = val.select(range(max_ds_len))
     val.set_format("torch", columns=["input_ids"])
 
     ngram_data = {
         i: NgramDataset(
-            Path(f'data/smoothed-{i}-gram-pile-dists-bf16-2_shards.npy'), 
+            Path(f'/mnt/ssd-1/lucia/ngrams-across-time/data/smoothed-{i}-gram-pile-dists-bf16-2_shards.npy'), 
             vocab_size, 
             max_ds_len
         )

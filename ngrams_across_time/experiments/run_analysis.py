@@ -2,14 +2,8 @@ import argparse
 from pathlib import Path
 from collect_metrics import get_metric_function
 from filter_data import filter_data
-from ngrams_across_time.image.load_image_model_data import get_available_image_models, load_models_and_synthetic_images, get_available_checkpoints as get_image_checkpoints
-from ngrams_across_time.language.load_language_model_data import load_models_and_ngrams
-from ngrams_across_time.language.hf_client import get_basic_pythia_model_names, get_model_checkpoints as get_language_checkpoints
 
-loader = {
-    'language': load_models_and_ngrams,
-    'image': load_models_and_synthetic_images,
-}
+from ngrams_across_time.experiments.load_models import load_models
 
 def main():
     parser = argparse.ArgumentParser(description="Run analysis on language or image models")
@@ -26,32 +20,7 @@ def main():
     db_path = Path("data/metric_db")
     data_dir = Path("data/filtered")
 
-    try:
-        models, dataset = loader[args.modality](args.model_name, args.order, args.dataset)
-    except Exception as e:
-        print(f"Error loading model and dataset: {e}")
-        print("This is likely because an unavailable model or dataset was specified.")
-        if args.modality == "language":
-            models = get_basic_pythia_model_names()
-            print("Available language models:")
-            for model in models:
-                print(f"- {model}")
-            checkpoints = get_language_checkpoints(model)
-            print(f"Available checkpoints for {model}:")
-            for step, revision in sorted(checkpoints.items()):
-                print(f"Step: {step}, Revision: {revision}")
-        else:  # image
-            models = get_available_image_models()
-            print("Available image models:")
-            for model in models:
-                print(f"- {model}")
-            model_name, dataset = model.split(" (")
-            dataset = dataset.rstrip(")")
-            checkpoints = get_image_checkpoints(model_name, dataset)
-            print(f"Available checkpoints for {model_name} on {dataset}:")
-            for checkpoint in sorted(checkpoints):
-                print(f"Checkpoint: {checkpoint}")
-    #     return
+    models, dataset = load_models(args.modality, args.model_name, args.dataset, args.order)
 
     metric_fn = get_metric_function(
         args.model_name,

@@ -43,7 +43,7 @@ def filter_data(
 
     start_loss = db.query_last(model=model, step=start, metric='loss')
     end_loss = db.query_last(model=model, step=end, metric='loss')
-    val_set: Dataset = load_from_disk("data/val_tokenized.hf").select(range(ds_len)) # type: ignore
+    val_set: Dataset = load_from_disk("/mnt/ssd-1/lucia/ngrams-across-time/data/val_tokenized.hf").select(range(ds_len)) # type: ignore
 
     filtered = []
     # Select the sequences with the largest drops in KL divergence

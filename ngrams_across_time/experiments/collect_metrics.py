@@ -59,7 +59,12 @@ def get_metric_function(
                 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
                 metric_results.update(metric_fn[modality](model, dataloader, order_index, missing_metrics))
                 for metric, tensor in metric_results.items():
-                    tags['metric'] = metric
+                    tags.update({
+                        'metric': metric,
+                        'order': order,
+                        })
+                    if metric == 'loss' and modality == 'language':
+                        tags['order'] = 'baseline'
                     db.add_tensor(tensor, tags)
             
 

@@ -1,21 +1,44 @@
 from pathlib import Path
+import pandas as pd
 
+import torch
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from datasets import load_from_disk, Dataset
+from transformer_lens import HookedTransformer
+
+from auto_circuit.utils.graph_utils import patchable_model
 
 from ngrams_across_time.utils.data import MultiOrderDataset
 from ngrams_across_time.language.language_data_types import NgramDataset
-from ngrams_across_time.language.hf_client import get_model_checkpoints, get_pythia_model_size, load_with_retries
+from ngrams_across_time.language.hf_client import get_model_checkpoints, get_pythia_model_size, load_with_retries, with_retries
 from ngrams_across_time.language.ngram_datasets import get_ngram_datasets
 
 
-def get_ngram_dataset(vocab_size: int, target_ngram: int, max_ds_len: int = 1024):
-    ngrams = [target_ngram - 1, target_ngram, target_ngram + 1]
+def load_token_data(max_ds_len: int = 1024):
     source_dataset_path = '/mnt/ssd-1/lucia/ngrams-across-time/data/val_tokenized.hf'
     val: Dataset = load_from_disk(source_dataset_path) # type: ignore
     val = val.select(range(max_ds_len))
     val.set_format("torch", columns=["input_ids"])
+    return val
+
+def get_ngram_examples(model_name: str, max_ds_len: int = 1024):
+    prompts_dataset_name = f"/mnt/ssd-1/lucia/ngrams-across-time/filtered-{n}-gram-data-{model_name.replace('/', '--')}.csv"
+    prompts_dataset = pd.read_csv(prompts_dataset_name)
+
+    dataset = load_token_data(max_ds_len)
+
+    prompts: list[torch.Tensor] = [
+        torch.tensor(dataset[int(row['sample_idx'])]['input_ids'][:int(row['end_token_idx']) + 1])
+        for _, row in prompts_dataset.iterrows()
+    ] # type: ignore
+    prompts = prompts[:1]
+    print(len(prompts), " prompts loaded")
+    return prompts
+
+def get_ngram_dataset(vocab_size: int, target_ngram: int, max_ds_len: int = 1024):
+    ngrams = [target_ngram - 1, target_ngram, target_ngram + 1]
+    val = load_token_data(max_ds_len)
 
     ngram_data = {
         i: NgramDataset(
@@ -44,18 +67,14 @@ if __name__ == '__main__':
 
     print("All operations completed successfully.")
 
-def load_models_and_ngrams(
-    model_name: str,
-    target_ngram: int = 2,
-    dataset_name: str = None,
-    start: int = 0,
-    end: int = 16384,
-    max_ds_len: int = 1024,
+def get_models(
+        model_name: str,
+        start: int = 0,
+        end: int = 16384,
+        patchable: bool = False,
+        device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        max_seq_len: int = 10,
 ):
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    vocab_size = len(tokenizer)
-    
     # Get checkpoints
     checkpoints = get_model_checkpoints(model_name)
     if not checkpoints:
@@ -70,8 +89,24 @@ def load_models_and_ngrams(
     for step, revision in ranged_checkpoints.items():
         model = load_with_retries(model_name, revision, model_size)
         if model:
-            models[step] = (tokenizer, model)
-        
-    dataset = get_ngram_dataset(vocab_size, target_ngram=target_ngram, max_ds_len=max_ds_len)
+            if patchable:
+                def load():
+                    return HookedTransformer.from_pretrained(
+                        model_name,
+                        torch_dtype=torch.float32,
+                        revision=revision,
+                        cache_dir=".cache"
+                    ).cuda()
 
-    return models, dataset
+                model: HookedTransformer = with_retries(load) # type: ignore
+                model.set_use_attn_result(True)
+                model.set_use_hook_mlp_in(True)
+                model.set_use_split_qkv_input(True)
+
+            models[step] = patchable_model(model, factorized=True, device=device, separate_qkv=True, seq_len=max_seq_len, slice_output="last_seq")
+
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    vocab_size = len(tokenizer)
+
+    return models, vocab_size

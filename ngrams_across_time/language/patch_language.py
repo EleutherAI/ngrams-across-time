@@ -83,7 +83,6 @@ def left_pad(tensors: list[Tensor], target_len: int) -> Tensor:
     # padded_prompts: Tensor = left_pad(prompts, 2048).cuda()
     # answers = [prompt[-1] for prompt in padded_prompts]
 
-
 def get_patchable_model(model_name: str, revision: str, device: torch.device, seq_len: int, slice_output: OutputSlice = "last_seq"):
     def load():
         return HookedTransformer.from_pretrained(
@@ -92,7 +91,7 @@ def get_patchable_model(model_name: str, revision: str, device: torch.device, se
             revision=revision,
             cache_dir=".cache"
         ).cuda()
-    
+
     model: HookedTransformer = with_retries(load) # type: ignore
     model.set_use_attn_result(True)
     model.set_use_hook_mlp_in(True)

@@ -17,43 +17,32 @@ def load_models(
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     max_seq_len: int = 10,
 ) -> Tuple[Dict[int, Any], Dataset]:
-    try:
-        if modality == 'language':
-            models, vocab_size = get_language_models(
-                model_name,
-                start=start,
-                end=end,
-                patchable=patchable,
-                device=device,
-                max_seq_len=max_seq_len
-            )
-            dataset = get_ngram_dataset(vocab_size, patchable=patchable, order=order)
-        elif modality == 'image':
-            models = get_image_models(
-                model_name,
-                dataset_name,
-                start,
-                end,
-                patchable=patchable,
-                device=device
-            )
-            dataset = get_image_dataset(dataset_name, patchable=patchable, return_type='synthetic')
-        else:
-            raise ValueError(f"Unsupported modality: {modality}")
 
-    except Exception as e:
-        print(f"Error loading model and dataset: {e}")
-        print("This is likely because an unavailable model or dataset was specified.")
-        if modality == "language":
-            models = get_basic_pythia_model_names()
-            print("Available language models:")
-            for model in models:
-                print(f"- {model}")
-            checkpoints = get_language_checkpoints(model)
-            print(f"Available checkpoints for {model}:")
-            for step, revision in sorted(checkpoints.items()):
-                print(f"Step: {step}, Revision: {revision}")
-        else:  # image
+    if modality == 'language':
+        if model_name not in get_basic_pythia_model_names():
+            print("Unknown model.")
+            if modality == "language":
+                models = get_basic_pythia_model_names()
+                print("Available language models:")
+                for model in models:
+                    print(f"- {model}")
+                checkpoints = get_language_checkpoints(model)
+                print(f"Available checkpoints for {model}:")
+                for step, revision in sorted(checkpoints.items()):
+                    print(f"Step: {step}, Revision: {revision}")
+            return
+
+        models, vocab_size = get_language_models(
+            model_name,
+            start=start,
+            end=end,
+            patchable=patchable,
+            device=device,
+            max_seq_len=max_seq_len
+        )
+        dataset = get_ngram_dataset(vocab_size, patchable=patchable, order=order)
+    elif modality == 'image':
+        if model_name not in [s.split(" (")[0] for s in get_available_image_models()]:
             models = get_available_image_models()
             print("Available image models:")
             for model in models:
@@ -64,6 +53,24 @@ def load_models(
             print(f"Available checkpoints for {model_name} on {dataset}:")
             for checkpoint in sorted(checkpoints):
                 print(f"Checkpoint: {checkpoint}")
-        return
+            return
+        
+        models = get_image_models(
+            model_name,
+            dataset_name,
+            start,
+            end,
+            patchable=patchable,
+            device=device
+        )
+        dataset = get_image_dataset(
+            dataset_name, 
+            patchable=patchable, 
+            return_type='synthetic',
+            model_name=model_name,
+            start_step=start,
+            end_step=end)
+    else:
+        raise ValueError(f"Unsupported modality: {modality}")
 
     return models, dataset

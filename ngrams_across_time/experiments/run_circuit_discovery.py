@@ -79,7 +79,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, required=True, help='Name of the model')
     parser.add_argument('--start', type=int, required=True, help='Start index')
     parser.add_argument('--end', type=int, required=True, help='End index')
-    parser.add_argument('--modality', type=str, required=True, choices=['language', 'vision'], help='Modality')
+    parser.add_argument('--modality', type=str, required=True, choices=['language', 'image'], help='Modality')
     parser.add_argument('--order', type=int, required=True, help='Order')
     parser.add_argument('--dataset_name', type=str, default='', help='Dataset name (optional)')
 

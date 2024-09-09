@@ -1,7 +1,9 @@
-from typing import List, Literal, Dict, Any
+from typing import List, Literal, Dict, Any, Optional
 from pathlib import Path
 import pickle
 import os
+import pandas as pd
+
 
 import torch
 import torchvision.transforms as T
@@ -67,7 +69,15 @@ def get_image_models(
     return models
 
 # TODO: enable specification of order
-def get_image_dataset(dataset_name: str, return_type: Literal['edited', 'synthetic'], patchable: bool = False) -> MultiOrderDataset | PromptDataset:
+def get_image_dataset(
+        dataset_name: str, 
+        return_type: Literal['edited', 'synthetic'], 
+        patchable: bool = False,
+        model_name: Optional[str] = None,
+        start_step: Optional[int] = None,
+        end_step: Optional[int] = None,
+        ce_type: Optional[Literal['qn', 'got']] = None
+) -> MultiOrderDataset | PromptDataset:
     ds = load_dataset(dataset_name)
     assert isinstance(ds, DatasetDict)
 
@@ -78,12 +88,15 @@ def get_image_dataset(dataset_name: str, return_type: Literal['edited', 'synthet
     else:
         raise ValueError(f"Invalid return_type: {return_type}")
     if patchable:
-        ds = get_patchable_image_dataset(ds)
+        data_index_path = Path(f"data/filtered-{dataset_name}-data-{model_name.replace('/', '--')}-{start_step}-{end_step}.csv")
+        ds = get_patchable_image_dataset(ds, data_index_path)
     return ds
 
 
-def get_patchable_image_dataset(ds: MultiOrderDataset) -> Dict[int, PromptDataset]:
+def get_patchable_image_dataset(ds: MultiOrderDataset, data_index_path: Path) -> Dict[int, PromptDataset]:
     classes = torch.unique(ds.target_dataset['label'])
+    data_indices = pd.read_csv(data_index_path)
+    ds = ds.select(data_indices['sample_idx'].tolist())
     return {
         int(cls): PromptDataset(
             clean_prompts=ds.target_dataset['pixel_values'][ds.target_dataset['label'] == cls],

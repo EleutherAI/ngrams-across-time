@@ -1,5 +1,10 @@
+import os
+from typing import Dict
+
 from pathlib import Path
 import pandas as pd
+
+from ngrams_across_time.utils.utils import assert_type
 
 import torch
 from torch.utils.data import DataLoader
@@ -8,6 +13,7 @@ from datasets import load_from_disk, Dataset
 from transformer_lens import HookedTransformer
 
 from auto_circuit.utils.graph_utils import patchable_model
+from auto_circuit.data import PromptDataset
 
 from ngrams_across_time.utils.data import MultiOrderDataset
 from ngrams_across_time.language.language_data_types import NgramDataset
@@ -22,25 +28,22 @@ def load_token_data(max_ds_len: int = 1024):
     val.set_format("torch", columns=["input_ids"])
     return val
 
-def get_ngram_examples(model_name: str, order: int, max_ds_len: int = 1024):
-    prompts_dataset_name = f"/mnt/ssd-1/lucia/ngrams-across-time/filtered-{order}-gram-data-{model_name.replace('/', '--')}.csv"
-    prompts_dataset = pd.read_csv(prompts_dataset_name)
 
-    dataset = load_token_data(max_ds_len)
+def get_ngram_dataset(
+        model_name: str, 
+        start: int, 
+        end: int, 
+        order: int, 
+        vocab_size: int, 
+        max_ds_len: int = 1024, 
+        patchable: bool = False
+):
+    if patchable:
+        return get_patchable_ngram_dataset(model_name, start, end, order)
+    else:
+        return get_ngram_dist_dataset(vocab_size, order, max_ds_len)
 
-    prompts_original = [
-        torch.tensor(dataset[int(row['sample_idx'])]['input_ids'][:int(row['end_token_idx']) + 1])
-        for _, row in prompts_dataset.iterrows()
-    ]
-    prompts_shorter = [prompt[1:] for prompt in prompts_original]
-    
-    prompts_original = prompts_original[:1]
-    prompts_shorter = prompts_shorter[:1]
-    
-    print(f"{len(prompts_original)} prompts loaded for each set")
-    return prompts_original, prompts_shorter
-
-def get_ngram_dataset(vocab_size: int, order: int, max_ds_len: int = 1024):
+def get_ngram_dist_dataset(vocab_size: int, order: int, max_ds_len: int = 1024, patchable: bool = False):
     ngrams = [order - 1, order, order + 1]
     val = load_token_data(max_ds_len)
 
@@ -60,6 +63,31 @@ def get_ngram_dataset(vocab_size: int, order: int, max_ds_len: int = 1024):
         high_order_dataset=ngram_data[order + 1],
         base_dataset=val,
     )
+
+def get_patchable_ngram_dataset(model_name: str, start: int, end: int, order: int) -> Dict[str, PromptDataset]:
+    dataset_name = f"{order}-grams-{start}-{end}-{model_name.replace('/', '--')}"
+    if not Path(dataset_name).exists():
+        f"Prompt dataset not found - use select_language_prompts.py to generate."
+    dataset = load_from_disk(dataset_name) # type: ignore
+    dataset = assert_type(Dataset, dataset)
+
+    patch_dict = {}
+
+    for row in dataset:
+        alternative_ngram_prefixes = torch.tensor(row['corrupt'], device=device)[:, :-1] # type: ignore
+
+        learned_ngram = torch.tensor(row['clean'], device=device) # type: ignore
+        learned_ngram_prefix_repeated = [learned_ngram[:-1] for _ in range(len(alternative_ngram_prefixes))]
+        learned_ngram_suffix_repeated = [learned_ngram[-1:] for _ in range(len(alternative_ngram_prefixes))]
+        
+        patch_dict[learned_ngram] = PromptDataset(
+            learned_ngram_prefix_repeated,
+            alternative_ngram_prefixes,
+            learned_ngram_suffix_repeated,
+            learned_ngram_suffix_repeated
+        )
+
+    return patch_dict
 
 if __name__ == '__main__':
     from torch.utils.data import DataLoader

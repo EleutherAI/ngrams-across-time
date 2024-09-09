@@ -1,4 +1,4 @@
-from typing import Tuple, List, Literal
+from typing import List, Literal, Dict, Any
 from pathlib import Path
 import pickle
 import os
@@ -11,6 +11,7 @@ from datasets import load_dataset, DatasetDict
 from torch.utils.data import Dataset, DataLoader
 
 from auto_circuit.utils.graph_utils import patchable_model
+from auto_circuit.data import PromptDataset
 
 from concept_erasure import QuadraticFitter, QuadraticEditor
 from concept_erasure.quantile import QuantileNormalizer
@@ -42,31 +43,55 @@ def get_available_checkpoints(model_name: str, dataset_name: str) -> List[int]:
     base_path = Path(f'/mnt/ssd-1/lucia/features-across-time/img-ckpts/{dataset_name}/{model_name}')
     return [int(x.name.split('-')[-1]) for x in base_path.iterdir()]
 
-def load_models_and_dataset(model_name: str, dataset_name: str, return_type: Literal['edited','synthetic']):
+def get_image_models(
+    model_name: str,
+    dataset_name: str,
+    start: int,
+    end: int,
+    patchable: bool = False,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+) -> Dict[int, Any]:
     checkpoints = get_available_checkpoints(model_name, dataset_name)
-    dataset = prepare_dataset(dataset_name, return_type)
+    checkpoints = [ckpt for ckpt in checkpoints if start <= ckpt <= end]
     
     models = {}
     for ckpt in checkpoints:
         model_path = get_model_path(model_name, dataset_name, ckpt)
         model = ConvNextV2ForImageClassification.from_pretrained(model_path).cuda()
+        if patchable:
+            model = patchable_model(model, factorized=True, device=device)
         models[ckpt] = model
         del model
         torch.cuda.empty_cache()
     
-    return models, dataset
+    return models
 
-def load_models_and_synthetic_images(
-        model_name: str, 
-        order: int, 
-        dataset_name: str, 
-        patchable: bool = False, 
-        device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ):
-    models, dataset = load_models_and_dataset(model_name, dataset_name, 'synthetic')
+# TODO: enable specification of order
+def get_image_dataset(dataset_name: str, return_type: Literal['edited', 'synthetic'], patchable: bool = False) -> MultiOrderDataset | PromptDataset:
+    ds = load_dataset(dataset_name)
+    assert isinstance(ds, DatasetDict)
+
+    if return_type == 'edited':
+        ds = get_ce_datasets(ds, dataset_name)
+    elif return_type == 'synthetic':
+        ds = get_synthetic_datasets(ds, dataset_name)
+    else:
+        raise ValueError(f"Invalid return_type: {return_type}")
     if patchable:
-        models = [patchable_model(model, factorized=True, device=device) for model in models]
-    return models, dataset
+        ds = get_patchable_image_dataset(ds)
+    return ds
+
+
+def get_patchable_image_dataset(ds: MultiOrderDataset) -> Dict[int, PromptDataset]:
+    classes = torch.unique(ds.target_dataset['label'])
+    return {
+        int(cls): PromptDataset(
+            clean_prompts=ds.target_dataset['pixel_values'][ds.target_dataset['label'] == cls],
+            corrupt_prompts=ds.low_order_dataset['pixel_values'][ds.low_order_dataset['label'] == cls],
+            answers=ds.target_dataset['label'][ds.target_dataset['label'] == cls],
+            wrong_answers=ds.low_order_dataset['label'][ds.low_order_dataset['label'] == cls]
+        ) for cls in classes
+    }
 
 def infer_columns(feats):
     from datasets import Image, ClassLabel

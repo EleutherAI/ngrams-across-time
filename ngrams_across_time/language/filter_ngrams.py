@@ -1,11 +1,14 @@
 from pathlib import Path
 from argparse import ArgumentParser
+import pickle
 
+import numpy as np
 import torch
 from torch import Tensor
 import pandas as pd
 from datasets import load_from_disk, Dataset
 from ngrams_across_time.utils.tensor_db import TensorDatabase
+from transformers import AutoTokenizer
 
 
 def top_k(matrix: Tensor, k=100):
@@ -17,7 +20,8 @@ def top_k(matrix: Tensor, k=100):
     return list(zip(rows.tolist(), cols.tolist(), values.tolist()))
 
 
-def filter_data(
+# TODO filter against lower order n-grams if they exist
+def filter_ngrams(
         model: str,
         db_path: Path,
         start: int,
@@ -25,6 +29,7 @@ def filter_data(
         n: int,
         ds_len: int = 1024,
 ): 
+    """Use pre-computed KL divergence data to filter to n-grams that are learned between two checkpoints."""
     # Arbitrarily chosen hyperparameter
     k = 2048
 
@@ -45,17 +50,20 @@ def filter_data(
     end_loss = db.query_last(model=model, step=end, metric='loss')
     val_set: Dataset = load_from_disk("/mnt/ssd-1/lucia/ngrams-across-time/data/val_tokenized.hf").select(range(ds_len)) # type: ignore
 
+    tokenizer = AutoTokenizer.from_pretrained(model)
+
     filtered = []
     # Select the sequences with the largest drops in KL divergence
     for (row, col, kl_div_reduction) in top_k(kl_delta, k):
         higher_kl_div_reduction = higher_kl_delta[row, col].item()
-
+        breakpoint()
         # Filter to items where the next highest order n-gram's KL divergence doesn't drop
         if higher_kl_div_reduction <= 0 and kl_div_reduction > 0:
             data = []
             # print(f"{row} {col}: n-gram KL div: {kl_div_reduction}, higher order n-gram KL div: {higher_kl_div_reduction}")
             ngram = val_set[row]['input_ids'][col - n + 1: col + 1].tolist()
-            data.extend([row, (col - n + 1), col, kl_div_reduction, higher_kl_div_reduction, ngram])
+            ngram_str = tokenizer.decode(ngram)
+            data.extend([row, (col - n + 1), col, kl_div_reduction, higher_kl_div_reduction, ngram, ngram_str])
             if start_loss: data.append(start_loss['tensor'][row, col].item())
             if end_loss: data.append(end_loss['tensor'][row, col].item())
 
@@ -67,7 +75,8 @@ def filter_data(
          "end_ngram_idx", 
          "kl_div_reduction", 
          "higher_order_kl_div_reduction",
-         "ngram"
+         "ngram",
+         "ngram_str"
         ] + (
             ["start_loss"] if start_loss else []
         ) + (
@@ -76,6 +85,32 @@ def filter_data(
     )
     df.to_csv(f"filtered-{n}-gram-data-{model.replace('/', '--')}-{start}-{end}.csv", index=False)
 
+def save_ngram_corruptions(df: pd.DataFrame, model: str, start: int, end: int, n: int):
+    bigrams_path = "/mnt/ssd-1/lucia/features-across-time/data/pile-deduped/bigrams.pkl"
+    with open(bigrams_path, "rb") as f:
+        bigram_counts = pickle.load(f).toarray().astype(np.float32)
+        unigram_counts = torch.tensor(bigram_counts).sum(dim=1).cuda()
+        del bigram_counts
+
+    ngram_data = {
+        'target': [],
+        'low_order': []
+    }
+    unique_ngrams = list(set(tuple(x) for x in df['ngram']))
+    num_samples = 100
+    for unique_ngram in unique_ngrams:
+        end_token = torch.tensor(unique_ngram[-1], device='cuda')
+        start_tokens = torch.multinomial(unigram_counts, (n - 1) * num_samples, replacement=True)
+        # TODO could select these to be n-grams that aren't learned between checkpoints
+        corrupt_ngrams = torch.cat([start_tokens.view(num_samples, n - 1), end_token.repeat(num_samples, 1)], dim=1)
+        
+        ngram_data['target'].append(unique_ngram)
+        ngram_data['low_order'].append(corrupt_ngrams.cpu().numpy())
+
+    # create huggingface dataset where clean is each unique n-gram and corrupt is the dataset of corrupt ngrams
+    dataset_name = f"{n}-grams-{start}-{end}-{model.replace('/', '--')}"
+    dataset = Dataset.from_dict(ngram_data)
+    dataset.save_to_disk(dataset_name)    
 
 def parse_args():
     parser = ArgumentParser(description='Select data points that evolve between two checkpoints')
@@ -94,4 +129,4 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    filter_data(args.model, Path(args.db), start=args.start, end=args.end, n=args.n)
+    filter_ngrams(args.model, Path(args.db), start=args.start, end=args.end, n=args.n)

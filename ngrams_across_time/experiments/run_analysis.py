@@ -20,7 +20,14 @@ def main():
     db_path = Path("data/metric_db")
     data_dir = Path("data/filtered")
 
-    models, dataset = load_models(args.modality, args.model_name, args.order, start=args.start, end=args.end)
+    models, dataset = load_models(
+        args.modality,
+        args.model_name,
+        args.order,
+        dataset_name=args.dataset,
+        start=args.start,
+        end=args.end
+    )
     metric_fn = get_metric_function(
         args.model_name,
         db_path,
@@ -30,7 +37,7 @@ def main():
         batch_size=args.batch_size,
         target_order=args.order
     )
-    for checkpoint in [128,256]:#models.keys():
+    for checkpoint in [args.start, args.end]:
         metric_fn(checkpoint)
 
     if args.modality == "language":

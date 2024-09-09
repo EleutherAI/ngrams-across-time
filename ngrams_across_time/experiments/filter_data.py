@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Literal
 
 import pandas as pd
+from datasets import Dataset
 
 import torch
 from torch import Tensor
@@ -9,6 +10,7 @@ from torch import Tensor
 from ngrams_across_time.utils.data import MultiOrderDataset
 from ngrams_across_time.utils.tensor_db import TensorDatabase
 from ngrams_across_time.image.image_data_types import image_hash
+from ngrams_across_time.language.filter_ngrams import save_ngram_corruptions
 
 def select_above_cutpoint(matrix: Tensor, cutpoint: float):
     mask = matrix > cutpoint
@@ -66,6 +68,8 @@ def filter_data(
     start_loss = metric_db.query_last(model=model, step=start, metric='loss', order=loss_order)
     end_loss = metric_db.query_last(model=model, step=end, metric='loss', order=loss_order)
 
+    breakpoint()
+
     filtered = []
     # Select the sequences with the largest drops in KL divergence
     for (idx, metric_div_reduction) in select_above_cutpoint(target_metric_delta, target_order_lower_bound):
@@ -105,3 +109,6 @@ def filter_data(
     )
     data_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(data_dir / f"filtered-{order}-data-{model.replace('/', '--')}-{start}-{end}.csv", index=False)
+
+    if modality == "language":
+        save_ngram_corruptions(df, model, start, end, order)

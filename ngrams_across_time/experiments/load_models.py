@@ -12,7 +12,6 @@ def load_models(
         modality: str, 
         model_name: str, 
         order: int, 
-        dataset: str = None, 
         max_ds_len: int = 1024, 
         start: int = 0, 
         end: int = 16384,
@@ -20,58 +19,61 @@ def load_models(
         max_seq_len: int = 10,
     ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    try:
-        if modality == 'language':
-            models, vocab_size = get_models(
-                model_name, 
+    # try:
+    if modality == 'language':
+        models = get_models(
+            model_name, 
+            start,
+            end,
+            patchable,
+            device = device,
+            max_seq_len=max_seq_len
+        )
+        vocab_size = models[1]
+        if patchable:
+            dataset = get_ngram_examples(
+                vocab_size,  
                 order, 
-                start,
-                end,
-                max_ds_len,
-                patchable,
+                max_ds_len
             )
-            if patchable:
-                dataset = get_ngram_dataset(
-                    vocab_size,  
-                    order, 
-                    max_ds_len
-                )
-            else:
-                dataset = get_ngram_examples(
-                    model_name, 
-                    max_ds_len
-                )
         else:
-            models, dataset = load_models_and_synthetic_images(
-                model_name, 
+            dataset = get_ngram_dataset(
+                vocab_size, 
                 order,
-                dataset,
-                patchable
+                max_ds_len
             )
+    else:
+        models, dataset = load_models_and_synthetic_images(
+            model_name, 
+            order,
+            dataset,
+            patchable,
+            device=device
+        )
 
-    except Exception as e:
-        print(f"Error loading model and dataset: {e}")
-        print("This is likely because an unavailable model or dataset was specified.")
-        if modality == "language":
-            models = get_basic_pythia_model_names()
-            print("Available language models:")
-            for model in models:
-                print(f"- {model}")
-            checkpoints = get_language_checkpoints(model)
-            print(f"Available checkpoints for {model}:")
-            for step, revision in sorted(checkpoints.items()):
-                print(f"Step: {step}, Revision: {revision}")
-        else:  # image
-            models = get_available_image_models()
-            print("Available image models:")
-            for model in models:
-                print(f"- {model}")
-            model_name, dataset = model.split(" (")
-            dataset = dataset.rstrip(")")
-            checkpoints = get_image_checkpoints(model_name, dataset)
-            print(f"Available checkpoints for {model_name} on {dataset}:")
-            for checkpoint in sorted(checkpoints):
-                print(f"Checkpoint: {checkpoint}")
-        return
+    # except Exception as e:
+    #     print(f"Error loading model and dataset: {e}")
+    #     print("This is likely because an unavailable model or dataset was specified.")
+    #     if modality == "language":
+    #         models = get_basic_pythia_model_names()
+    #         print("Available language models:")
+    #         for model in models:
+    #             print(f"- {model}")
+    #         checkpoints = get_language_checkpoints(model)
+    #         print(f"Available checkpoints for {model}:")
+    #         for step, revision in sorted(checkpoints.items()):
+    #             print(f"Step: {step}, Revision: {revision}")
+    #     else:  # image
+    #         models = get_available_image_models()
+    #         print("Available image models:")
+    #         for model in models:
+    #             print(f"- {model}")
+    #         model_name, dataset = model.split(" (")
+    #         dataset = dataset.rstrip(")")
+    #         checkpoints = get_image_checkpoints(model_name, dataset)
+    #         print(f"Available checkpoints for {model_name} on {dataset}:")
+    #         for checkpoint in sorted(checkpoints):
+    #             print(f"Checkpoint: {checkpoint}")
+    #     return
 
     return models, dataset

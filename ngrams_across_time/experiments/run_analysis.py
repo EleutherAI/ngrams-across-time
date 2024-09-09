@@ -20,8 +20,7 @@ def main():
     db_path = Path("data/metric_db")
     data_dir = Path("data/filtered")
 
-    models, dataset = load_models(args.modality, args.model_name, args.dataset, args.order)
-
+    models, dataset = load_models(args.modality, args.model_name, args.order, start=args.start, end=args.end)
     metric_fn = get_metric_function(
         args.model_name,
         db_path,

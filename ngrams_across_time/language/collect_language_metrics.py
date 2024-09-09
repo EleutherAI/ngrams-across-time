@@ -16,12 +16,10 @@ from ngrams_across_time.language.hf_client import get_model_checkpoints, get_bas
 from ngrams_across_time.utils.divergences import kl_divergence_log_space, js_divergence_log_space
 from ngrams_across_time.utils.tensor_db import TensorDatabase
 
-def collect_language_divergences(tokenizer_model, dataloader, order_index, metrics: List[Literal['kl', 'js', 'loss']]):
-    tokenizer, model = tokenizer_model
+def collect_language_divergences(model, dataloader, order_index, metrics: List[Literal['kl', 'js', 'loss']], vocab_size: int):
     model.eval()
     device = model.device
     divergences = {metric: [] for metric in metrics}
-    vocab_size = len(tokenizer)
     with torch.no_grad():
         for batch in tqdm(dataloader):
             tokens_batch = batch[-1]['input_ids']

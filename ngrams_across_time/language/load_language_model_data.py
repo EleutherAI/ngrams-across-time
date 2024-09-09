@@ -22,22 +22,26 @@ def load_token_data(max_ds_len: int = 1024):
     val.set_format("torch", columns=["input_ids"])
     return val
 
-def get_ngram_examples(model_name: str, max_ds_len: int = 1024):
-    prompts_dataset_name = f"/mnt/ssd-1/lucia/ngrams-across-time/filtered-{n}-gram-data-{model_name.replace('/', '--')}.csv"
+def get_ngram_examples(model_name: str, order: int, max_ds_len: int = 1024):
+    prompts_dataset_name = f"/mnt/ssd-1/lucia/ngrams-across-time/filtered-{order}-gram-data-{model_name.replace('/', '--')}.csv"
     prompts_dataset = pd.read_csv(prompts_dataset_name)
 
     dataset = load_token_data(max_ds_len)
 
-    prompts: list[torch.Tensor] = [
+    prompts_original = [
         torch.tensor(dataset[int(row['sample_idx'])]['input_ids'][:int(row['end_token_idx']) + 1])
         for _, row in prompts_dataset.iterrows()
-    ] # type: ignore
-    prompts = prompts[:1]
-    print(len(prompts), " prompts loaded")
-    return prompts
+    ]
+    prompts_shorter = [prompt[1:] for prompt in prompts_original]
+    
+    prompts_original = prompts_original[:1]
+    prompts_shorter = prompts_shorter[:1]
+    
+    print(f"{len(prompts_original)} prompts loaded for each set")
+    return prompts_original, prompts_shorter
 
-def get_ngram_dataset(vocab_size: int, target_ngram: int, max_ds_len: int = 1024):
-    ngrams = [target_ngram - 1, target_ngram, target_ngram + 1]
+def get_ngram_dataset(vocab_size: int, order: int, max_ds_len: int = 1024):
+    ngrams = [order - 1, order, order + 1]
     val = load_token_data(max_ds_len)
 
     ngram_data = {
@@ -51,9 +55,9 @@ def get_ngram_dataset(vocab_size: int, target_ngram: int, max_ds_len: int = 1024
     }
     
     return MultiOrderDataset(
-        target_dataset=ngram_data[target_ngram],
-        low_order_dataset=ngram_data[target_ngram - 1],
-        high_order_dataset=ngram_data[target_ngram + 1],
+        target_dataset=ngram_data[order],
+        low_order_dataset=ngram_data[order - 1],
+        high_order_dataset=ngram_data[order + 1],
         base_dataset=val,
     )
 
@@ -103,7 +107,9 @@ def get_models(
                 model.set_use_hook_mlp_in(True)
                 model.set_use_split_qkv_input(True)
 
-            models[step] = patchable_model(model, factorized=True, device=device, separate_qkv=True, seq_len=max_seq_len, slice_output="last_seq")
+                models[step] = patchable_model(model, factorized=True, device=device, separate_qkv=True, seq_len=max_seq_len, slice_output="last_seq")
+            else:
+                models[step] = model
 
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)

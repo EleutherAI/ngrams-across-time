@@ -76,7 +76,7 @@ def get_image_dataset(
         model_name: Optional[str] = None,
         start_step: Optional[int] = None,
         end_step: Optional[int] = None,
-        ce_type: Optional[Literal['qn', 'got']] = None
+        order: Optional[int] = None
 ) -> MultiOrderDataset | PromptDataset:
     ds = load_dataset(dataset_name)
     assert isinstance(ds, DatasetDict)
@@ -88,23 +88,28 @@ def get_image_dataset(
     else:
         raise ValueError(f"Invalid return_type: {return_type}")
     if patchable:
-        data_index_path = Path(f"data/filtered-{dataset_name}-data-{model_name.replace('/', '--')}-{start_step}-{end_step}.csv")
+        assert order is not None
+        data_index_path = Path(f"data/filtered/filtered-{order}-data-{model_name.replace('/', '--')}-{start_step}-{end_step}.csv")
         ds = get_patchable_image_dataset(ds, data_index_path)
     return ds
 
 
 def get_patchable_image_dataset(ds: MultiOrderDataset, data_index_path: Path) -> Dict[int, PromptDataset]:
-    classes = torch.unique(ds.target_dataset['label'])
     data_indices = pd.read_csv(data_index_path)
     ds = ds.select(data_indices['sample_idx'].tolist())
-    return {
-        int(cls): PromptDataset(
-            clean_prompts=ds.target_dataset['pixel_values'][ds.target_dataset['label'] == cls],
-            corrupt_prompts=ds.low_order_dataset['pixel_values'][ds.low_order_dataset['label'] == cls],
-            answers=ds.target_dataset['label'][ds.target_dataset['label'] == cls],
-            wrong_answers=ds.low_order_dataset['label'][ds.low_order_dataset['label'] == cls]
-        ) for cls in classes
-    }
+
+    result = {}
+    for target, low in zip(ds.target_dataset, ds.low_order_dataset):
+        cls = int(target['label'])
+        if cls not in result:
+            result[cls] = PromptDataset([], [], [], [])
+        
+        result[cls].clean_prompts.append(target['pixel_values'])
+        result[cls].corrupt_prompts.append(low['pixel_values'])
+        result[cls].answers.append(target['label'])
+        result[cls].wrong_answers.append(low['label'])
+
+    return result
 
 def infer_columns(feats):
     from datasets import Image, ClassLabel

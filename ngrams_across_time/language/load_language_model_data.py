@@ -74,9 +74,9 @@ def get_patchable_ngram_dataset(model_name: str, start: int, end: int, order: in
     patch_dict = {}
 
     for row in dataset:
-        alternative_ngram_prefixes = torch.tensor(row['corrupt'], device=device)[:, :-1] # type: ignore
+        alternative_ngram_prefixes = torch.tensor(row['low_order'], device=device)[:, :-1] # type: ignore
 
-        learned_ngram = torch.tensor(row['clean'], device=device) # type: ignore
+        learned_ngram = torch.tensor(row['target'], device=device) # type: ignore
         learned_ngram_prefix_repeated = [learned_ngram[:-1] for _ in range(len(alternative_ngram_prefixes))]
         learned_ngram_suffix_repeated = [learned_ngram[-1:] for _ in range(len(alternative_ngram_prefixes))]
         

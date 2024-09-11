@@ -62,13 +62,12 @@ def filter_data(
     higher_cutpoint_lower = torch.quantile(lower_metric_delta, 1 - quantile)
     higher_cutpoint_target = torch.quantile(target_metric_delta, 1 - quantile)
     higher_cutpoint_higher = torch.quantile(higher_metric_delta, 1 - quantile)
-    target_order_lower_bound = torch.max(torch.tensor([higher_cutpoint_lower, higher_cutpoint_target, higher_cutpoint_higher, 0]))
+    # target_order_lower_bound = torch.max(torch.tensor([higher_cutpoint_lower, higher_cutpoint_target, higher_cutpoint_higher, 0]))
+    target_order_lower_bound = higher_cutpoint_target
 
     loss_order = order if modality == 'image' else 'baseline'
     start_loss = metric_db.query_last(model=model, step=start, metric='loss', order=loss_order)
     end_loss = metric_db.query_last(model=model, step=end, metric='loss', order=loss_order)
-
-    breakpoint()
 
     filtered = []
     # Select the sequences with the largest drops in KL divergence
@@ -80,10 +79,10 @@ def filter_data(
             selected_data = []
             # print(f"{row} {col}: n-gram KL div: {kl_div_reduction}, higher order n-gram KL div: {higher_kl_div_reduction}")
             if modality == "language":
-                idx = idx[0], slice(idx[1] - order + 1, idx[1] + 1)
-                example = example_data[idx[0]]['input_ids'][idx[1]].tolist()
-                if start_loss: selected_data.append(start_loss['tensor'][idx[0], idx[1]].item())
-                if end_loss: selected_data.append(end_loss['tensor'][idx[0], idx[1]].item())
+                example_idx = slice(idx[1] - order, idx[1])
+                example = example_data[idx[0]]['input_ids'][example_idx].tolist()
+                if start_loss: selected_data.append(start_loss['tensor'][idx[0], idx[1] - 1].item())
+                if end_loss: selected_data.append(end_loss['tensor'][idx[0], idx[1] - 1].item())
             else:
                 example = image_hash(example_data[idx]['pixel_values'])
                 if start_loss: selected_data.append(start_loss['tensor'][idx].item())

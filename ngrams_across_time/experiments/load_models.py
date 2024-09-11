@@ -40,7 +40,17 @@ def load_models(
             device=device,
             max_seq_len=max_seq_len
         )
-        dataset = get_ngram_dataset(vocab_size, patchable=patchable, order=order)
+        dataset = get_ngram_dataset(
+            model_name,
+            start,
+            end,
+            order,
+            vocab_size,
+            patchable=patchable,
+        )
+
+        # Pack models and vocab size into a tuple for later use
+        models = (models, vocab_size)
     elif modality == 'image':
         if model_name not in [s.split(" (")[0] for s in get_available_image_models()]:
             models = get_available_image_models()
@@ -69,7 +79,9 @@ def load_models(
             return_type='synthetic',
             model_name=model_name,
             start_step=start,
-            end_step=end)
+            end_step=end,
+            order=order
+        )
     else:
         raise ValueError(f"Unsupported modality: {modality}")
 

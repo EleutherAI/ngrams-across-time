@@ -17,12 +17,13 @@ def get_metric_function(
     target_order: int = 2,
 ):
     orders = [target_order - 1, target_order, target_order + 1]
-
     if modality == 'language':
         models, vocab_size = models
 
     def get_or_compute_metrics(checkpoint: int):
         db = TensorDatabase(str(db_path / "tensor_db"), str(db_path / "tensors"))
+
+        db.clean_invalid_tensors()
 
         metric_results = {}
         missing_metrics = []
@@ -47,7 +48,7 @@ def get_metric_function(
                     if metric == 'loss':
                         tags['order'] = 'baseline'
                 
-                metric_results[metric] = db.query_last(**tags)
+                metric_results[metric] = db.query_last(**tags)['tensor']
                 if metric_results[metric] is None:
                     missing_metrics.append(metric)
                 
@@ -60,13 +61,16 @@ def get_metric_function(
                 else:
                     metric_results.update(collect_image_losses(model, dataloader, order_index, missing_metrics))
                 for metric, tensor in metric_results.items():
-                    tags.update({
-                        'metric': metric,
-                        'order': order,
-                        })
-                    if metric == 'loss' and modality == 'language':
-                        tags['order'] = 'baseline'
-                    db.add_tensor(tensor, tags)
+                    if metric in missing_metrics:
+                        tags.update({
+                            'metric': metric,
+                            'order': order,
+                            })
+                        if metric == 'loss' and modality == 'language':
+                            tags['order'] = 'baseline'
+                        
+                        assert isinstance(tensor, torch.Tensor)
+                        db.add_tensor(tensor, tags)
             
 
         db.close()
@@ -74,3 +78,4 @@ def get_metric_function(
         return metric_results
     
     return get_or_compute_metrics
+

@@ -31,6 +31,8 @@ def collect_language_divergences(model, dataloader, order_index, metrics: List[L
                 kl_div = kl_divergence_log_space(logits, ngram_batch.to(device), dim=-1)
                 divergences['kl'].append(kl_div.detach().cpu())
             
+            breakpoint()
+
             if 'js' in metrics:
                 js_div = js_divergence_log_space(logits, ngram_batch.to(device), dim=-1)
                 divergences['js'].append(js_div.detach().cpu())

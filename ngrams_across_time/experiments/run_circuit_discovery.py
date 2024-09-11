@@ -15,14 +15,12 @@ from ngrams_across_time.experiments.load_models import load_models
 
 
 def main(model_name: str, start: int, end: int, modality: str, order: int, dataset_name: str = ''):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if modality == 'language':
         models, dataset_dict = load_models(
             modality,
             model_name,
             order,
-            max_ds_len=1024,
             start=start,
             end=end,
             patchable=True,
@@ -61,11 +59,13 @@ def main(model_name: str, start: int, end: int, modality: str, order: int, datas
             alternate_model=ablation_model
         )
         circuit_data["label"].append(label)
-        circuit_data["quantile_thresholds"].append([np.quantile(circuit_data["daat_edge_prune_scores"], q) for q in quantiles])
+        all_scores = torch.cat([scores.flatten() for scores in circuit_data["daat_edge_prune_scores"].values()]).cpu().numpy()
+
+        circuit_data["quantile_thresholds"].append([np.quantile(all_scores, q) for q in quantiles])
 
         # Viz
         for threshold in circuit_data["quantile_thresholds"]:
-            sankey, included_layer_count = net_viz(base_model, base_model.edges, circuit_data["daat_edge_prune_scores"], score_threshold=threshold, vert_interval=(0, 1))
+            sankey, included_layer_count = net_viz(base_model, base_model.edges, circuit_data["daat_edge_prune_scores"], score_threshold=threshold[-1], vert_interval=(0, 1))
             
             if included_layer_count == 0:
                 break

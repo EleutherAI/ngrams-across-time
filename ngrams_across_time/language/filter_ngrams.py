@@ -96,7 +96,7 @@ def save_ngram_corruptions(df: pd.DataFrame, model: str, start: int, end: int, n
         'target': [],
         'low_order': []
     }
-    unique_ngrams = list(set(tuple(x) for x in df['ngram']))
+    unique_ngrams = list(set(tuple(x) for x in df['example']))
     num_samples = 100
     for unique_ngram in unique_ngrams:
         end_token = torch.tensor(unique_ngram[-1], device='cuda')

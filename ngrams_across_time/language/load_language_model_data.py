@@ -18,7 +18,6 @@ from auto_circuit.data import PromptDataset
 from ngrams_across_time.utils.data import MultiOrderDataset
 from ngrams_across_time.language.language_data_types import NgramDataset
 from ngrams_across_time.language.hf_client import get_model_checkpoints, get_pythia_model_size, load_with_retries, with_retries
-from ngrams_across_time.language.ngram_datasets import get_ngram_datasets
 
 
 def load_token_data(max_ds_len: int = 1024):
@@ -88,16 +87,6 @@ def get_patchable_ngram_dataset(model_name: str, start: int, end: int, order: in
         )
 
     return patch_dict
-
-if __name__ == '__main__':
-    from torch.utils.data import DataLoader
-    datasets = get_ngram_datasets(50_254, ngrams=[2, 3], max_ds_len=48)
-    dataloader = DataLoader(datasets[1], batch_size=32, shuffle=False)
-
-    for batch in dataloader:
-        pass
-
-    print("All operations completed successfully.")
 
 def get_models(
         model_name: str,

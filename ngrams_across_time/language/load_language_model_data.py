@@ -74,9 +74,9 @@ def get_patchable_ngram_dataset(model_name: str, start: int, end: int, order: in
     patch_dict = {}
 
     for row in dataset:
-        alternative_ngram_prefixes = torch.tensor(row['low_order'], device=device)[:, :-1] # type: ignore
+        alternative_ngram_prefixes = torch.tensor(row['low_order'])[:, :-1] # type: ignore
 
-        learned_ngram = torch.tensor(row['target'], device=device) # type: ignore
+        learned_ngram = torch.tensor(row['target']) # type: ignore
         learned_ngram_prefix_repeated = [learned_ngram[:-1] for _ in range(len(alternative_ngram_prefixes))]
         learned_ngram_suffix_repeated = [learned_ngram[-1:] for _ in range(len(alternative_ngram_prefixes))]
         
@@ -105,7 +105,7 @@ def get_models(
         end: int = 16384,
         patchable: bool = False,
         device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        max_seq_len: int = 10,
+        order: int = 2,
 ):
     # Get checkpoints
     checkpoints = get_model_checkpoints(model_name)
@@ -135,7 +135,7 @@ def get_models(
                 model.set_use_hook_mlp_in(True)
                 model.set_use_split_qkv_input(True)
 
-                models[step] = patchable_model(model, factorized=True, device=device, separate_qkv=True, seq_len=max_seq_len, slice_output="last_seq")
+                models[step] = patchable_model(model, factorized=True, device=device, separate_qkv=True, seq_len=order - 1, slice_output="last_seq")
             else:
                 models[step] = model
 

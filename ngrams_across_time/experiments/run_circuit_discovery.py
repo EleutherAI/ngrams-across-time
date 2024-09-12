@@ -17,7 +17,7 @@ from ngrams_across_time.experiments.load_models import load_models
 def main(model_name: str, start: int, end: int, modality: str, order: int, dataset_name: str = ''):
 
     if modality == 'language':
-        models, dataset_dict = load_models(
+        (models, vocab_size), dataset_dict = load_models(
             modality,
             model_name,
             order,

@@ -38,7 +38,7 @@ def load_models(
             end=end,
             patchable=patchable,
             device=device,
-            max_seq_len=max_seq_len
+            order=order
         )
         dataset = get_ngram_dataset(
             model_name,

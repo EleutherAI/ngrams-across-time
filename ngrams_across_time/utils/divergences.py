@@ -41,7 +41,6 @@ def js_divergence_log_space(
         .sub(math.log(2))
         .logsumexp(0)
     )
-
     kl_p = torch.nansum(
         logit_p.sub(logsumexp_p).exp() * (logit_p.sub(logsumexp_p).sub(log_m)), dim
     )

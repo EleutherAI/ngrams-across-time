@@ -62,6 +62,16 @@ class TensorDatabase:
         self.db.close()
 
 
+    def clean_invalid_tensors(self) -> None:
+        for item in self.db.all():
+            tensor_path = os.path.join(self.tensor_dir, item['filename'])
+            try:
+                loaded = torch.load(tensor_path)
+                if not isinstance(loaded, torch.Tensor):
+                    self.remove_tensor(item.doc_id)
+            except:
+                self.remove_tensor(item.doc_id)
+
 # Example usage
 if __name__ == "__main__":
     db = TensorDatabase("test_tensor_db", "test_tensors")

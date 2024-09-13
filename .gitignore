@@ -224,3 +224,4 @@ prototype.py
 *.pickle
 *.csv
 *.pkl
+test_image/

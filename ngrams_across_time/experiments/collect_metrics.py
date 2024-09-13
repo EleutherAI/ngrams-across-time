@@ -3,14 +3,14 @@ from typing import Dict, Tuple
 import torch
 from torch.utils.data import DataLoader
 from ngrams_across_time.utils.tensor_db import TensorDatabase
-from ngrams_across_time.utils.data import MultiOrderDataset
+from ngrams_across_time.utils.data import ZippedDataset
 from ngrams_across_time.image.collect_image_metrics import collect_image_losses
 from ngrams_across_time.language.collect_language_metrics import collect_language_divergences
 
 def get_metric_function(
     model_name: str,
     db_path: Path,
-    dataset: MultiOrderDataset,
+    dataset: ZippedDataset,
     models: Dict[int, torch.nn.Module] | Tuple[Dict[int, torch.nn.Module], int],
     modality: str,
     batch_size: int = 32,

@@ -15,7 +15,7 @@ from transformer_lens import HookedTransformer
 from auto_circuit.utils.graph_utils import patchable_model
 from auto_circuit.data import PromptDataset
 
-from ngrams_across_time.utils.data import MultiOrderDataset
+from ngrams_across_time.utils.data import ZippedDataset
 from ngrams_across_time.language.language_data_types import NgramDataset
 from ngrams_across_time.language.hf_client import get_model_checkpoints, get_pythia_model_size, load_with_retries, with_retries
 
@@ -56,7 +56,7 @@ def get_ngram_dist_dataset(vocab_size: int, order: int, max_ds_len: int = 1024, 
         for i in ngrams
     }
     
-    return MultiOrderDataset(
+    return ZippedDataset(
         target_dataset=ngram_data[order],
         low_order_dataset=ngram_data[order - 1],
         high_order_dataset=ngram_data[order + 1],

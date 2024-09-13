@@ -3,7 +3,7 @@ from typing import List
 
 
 
-class MultiOrderDataset(TorchDataset):
+class ZippedDataset(TorchDataset):
     def __init__(self, target_dataset: TorchDataset, low_order_dataset: TorchDataset, 
                  high_order_dataset: TorchDataset, base_dataset: TorchDataset):
         self.target_dataset = target_dataset
@@ -13,7 +13,7 @@ class MultiOrderDataset(TorchDataset):
         assert len(self.target_dataset) == len(self.low_order_dataset) == len(self.high_order_dataset) == len(self.base_dataset)
 
     def select(self, idx: List[int]):
-        return MultiOrderDataset(
+        return ZippedDataset(
             target_dataset=self.target_dataset.select(idx),
             low_order_dataset=self.low_order_dataset.select(idx),
             high_order_dataset=self.high_order_dataset.select(idx),

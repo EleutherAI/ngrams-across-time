@@ -25,7 +25,7 @@ from ngrams_across_time.image.image_data_types import (
     IndependentCoordinateSampler,
     GaussianMixture,
 )
-from ngrams_across_time.utils.data import MultiOrderDataset
+from ngrams_across_time.utils.data import ZippedDataset
 
 def get_available_image_models() -> List[str]:
     base_path = Path('/mnt/ssd-1/lucia/features-across-time/img-ckpts')
@@ -77,7 +77,7 @@ def get_image_dataset(
         start_step: Optional[int] = None,
         end_step: Optional[int] = None,
         order: Optional[int] = None
-) -> MultiOrderDataset | PromptDataset:
+) -> ZippedDataset | PromptDataset:
     ds = load_dataset(dataset_name)
     assert isinstance(ds, DatasetDict)
 
@@ -94,7 +94,7 @@ def get_image_dataset(
     return ds
 
 
-def get_patchable_image_dataset(ds: MultiOrderDataset, data_index_path: Path) -> Dict[int, PromptDataset]:
+def get_patchable_image_dataset(ds: ZippedDataset, data_index_path: Path) -> Dict[int, PromptDataset]:
     data_indices = pd.read_csv(data_index_path)
     ds = ds.select(data_indices['sample_idx'].tolist())
 
@@ -190,7 +190,7 @@ def get_ce_datasets(dataset: DatasetDict, dataset_name: str, return_type: Litera
         "got_dataset": ConceptEditedDataset(class_probs, editor, X_val, Y_val, seed),
     }
 
-    return MultiOrderDataset(
+    return ZippedDataset(
         low_order_dataset=val_sets['qn_dataset'], 
         target_dataset=val_sets['got_dataset'], 
         high_order_dataset=val_sets['normal_dataset'], 
@@ -210,7 +210,7 @@ def get_synthetic_datasets(dataset: DatasetDict, dataset_name: str):
         "normal_dataset": val,
     }
 
-    return MultiOrderDataset(
+    return ZippedDataset(
         low_order_dataset=val_sets['ics_dataset'], 
         target_dataset=val_sets['gauss_dataset'], 
         high_order_dataset=val_sets['normal_dataset'], 

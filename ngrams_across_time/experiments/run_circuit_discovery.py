@@ -19,10 +19,10 @@ from ngrams_across_time.utils.utils import get_logit_diff
 
 
 
-def score_circuits(quantiles, edge_scores, source_model, rec_model, dataloader, label):
+def score_circuits(quantiles, edge_scores, source_model, dest_model, dataloader, label):
     keep_edges = []
     top_edges_with_scores = []
-    device = next(rec_model.parameters()).device
+    device = next(dest_model.parameters()).device
     results = []
 
     corrupt_ablations = batch_src_ablations(source_model, dataloader, AblationType.RESAMPLE, 'corrupt')
@@ -39,8 +39,8 @@ def score_circuits(quantiles, edge_scores, source_model, rec_model, dataloader, 
                     continue
 
                 seq_pos = seq_pos if scores.ndim == 3 else None
-                keep_edges.extend([rec_model.edge_dict[seq_pos][i] for i in high_score_indices])
-                top_edges_with_scores.extend([(rec_model.edge_dict[seq_pos][i].name, score[i].item()) for i in high_score_indices])
+                keep_edges.extend([dest_model.edge_dict[seq_pos][i] for i in high_score_indices])
+                top_edges_with_scores.extend([(dest_model.edge_dict[seq_pos][i].name, score[i].item()) for i in high_score_indices])
 
 
         for batch in tqdm(dataloader, f'testing patch results on {quantile} quantile edges'):
@@ -52,13 +52,13 @@ def score_circuits(quantiles, edge_scores, source_model, rec_model, dataloader, 
             source_clean_diff, source_clean_loss, source_clean_off_loss = get_logit_diff(source_model, clean_input, correct_class, target_class)
             source_corrupt_diff, source_corrupt_loss, source_corrupt_off_loss = get_logit_diff(source_model, corrupt_input, correct_class, target_class)
             # Old model results
-            rec_clean_diff, rec_clean_loss, rec_clean_off_loss = get_logit_diff(rec_model, clean_input, correct_class, target_class)
-            rec_corrupt_diff, rec_corrupt_loss, rec_corrupt_off_loss = get_logit_diff(rec_model, corrupt_input, correct_class, target_class)
+            dest_clean_diff, dest_clean_loss, dest_clean_off_loss = get_logit_diff(dest_model, clean_input, correct_class, target_class)
+            dest_corrupt_diff, dest_corrupt_loss, dest_corrupt_off_loss = get_logit_diff(dest_model, corrupt_input, correct_class, target_class)
             # Patched young model results
-            with patch_mode(rec_model, corrupt_ablations[batch.key], keep_edges):
-                patched_rec_corrupt_diff, patched_rec_corrupt_loss, patched_rec_corrupt_off_loss = get_logit_diff(rec_model, corrupt_input, correct_class, target_class)
-            with patch_mode(rec_model, clean_ablations[batch.key], keep_edges):
-                patched_rec_clean_diff, patched_rec_clean_loss, patched_rec_clean_off_loss = get_logit_diff(rec_model, clean_input, correct_class, target_class)
+            with patch_mode(dest_model, corrupt_ablations[batch.key], keep_edges):
+                patched_dest_corrupt_diff, patched_dest_corrupt_loss, patched_dest_corrupt_off_loss = get_logit_diff(dest_model, corrupt_input, correct_class, target_class)
+            with patch_mode(dest_model, clean_ablations[batch.key], keep_edges):
+                patched_dest_clean_diff, patched_dest_clean_loss, patched_dest_clean_off_loss = get_logit_diff(dest_model, clean_input, correct_class, target_class)
             batch_results = {
                 'source_clean_diff': source_clean_diff,
                 'source_corrupt_diff': source_corrupt_diff,
@@ -66,20 +66,20 @@ def score_circuits(quantiles, edge_scores, source_model, rec_model, dataloader, 
                 'source_corrupt_loss': source_corrupt_loss,
                 'source_clean_off_loss': source_clean_off_loss,
                 'source_corrupt_off_loss': source_corrupt_off_loss,
-                'rec_clean_diff': rec_clean_diff,
-                'rec_corrupt_diff': rec_corrupt_diff,
-                'rec_clean_loss': rec_clean_loss,
-                'rec_corrupt_loss': rec_corrupt_loss,
-                'rec_clean_off_loss': rec_clean_off_loss,
-                'rec_corrupt_off_loss': rec_corrupt_off_loss,
-                'patched_rec_clean_diff': patched_rec_clean_diff,
-                'patched_rec_corrupt_diff': patched_rec_corrupt_diff,
-                'patched_rec_clean_loss': patched_rec_clean_loss,
-                'patched_rec_corrupt_loss': patched_rec_corrupt_loss,
-                'patched_rec_clean_off_loss': patched_rec_clean_off_loss,
-                'patched_rec_corrupt_off_loss': patched_rec_corrupt_off_loss,
-                'patched_rec_clean_diff': patched_rec_clean_diff,
-                'patched_rec_corrupt_diff': patched_rec_corrupt_diff,
+                'dest_clean_diff': dest_clean_diff,
+                'dest_corrupt_diff': dest_corrupt_diff,
+                'dest_clean_loss': dest_clean_loss,
+                'dest_corrupt_loss': dest_corrupt_loss,
+                'dest_clean_off_loss': dest_clean_off_loss,
+                'dest_corrupt_off_loss': dest_corrupt_off_loss,
+                'patched_dest_clean_diff': patched_dest_clean_diff,
+                'patched_dest_corrupt_diff': patched_dest_corrupt_diff,
+                'patched_dest_clean_loss': patched_dest_clean_loss,
+                'patched_dest_corrupt_loss': patched_dest_corrupt_loss,
+                'patched_dest_clean_off_loss': patched_dest_clean_off_loss,
+                'patched_dest_corrupt_off_loss': patched_dest_corrupt_off_loss,
+                'patched_dest_clean_diff': patched_dest_clean_diff,
+                'patched_dest_corrupt_diff': patched_dest_corrupt_diff,
                 'quantile': quantile,
                 'label': ','.join(map(str, label.numpy())),
                 'n_edges': len(keep_edges)

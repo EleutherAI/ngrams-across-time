@@ -7,7 +7,7 @@ from datasets import Dataset
 import torch
 from torch import Tensor
 
-from ngrams_across_time.utils.data import MultiOrderDataset
+from ngrams_across_time.utils.data import ZippedDataset
 from ngrams_across_time.utils.tensor_db import TensorDatabase
 from ngrams_across_time.image.image_data_types import image_hash
 from ngrams_across_time.language.filter_ngrams import save_ngram_corruptions
@@ -29,7 +29,7 @@ def select_above_cutpoint(matrix: Tensor, cutpoint: float):
 def filter_data(
         model: str,
         metric_db_path: Path,
-        data: MultiOrderDataset,
+        data: ZippedDataset,
         start: int,
         end: int,
         order: int,

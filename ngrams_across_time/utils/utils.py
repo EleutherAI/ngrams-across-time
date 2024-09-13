@@ -19,9 +19,22 @@ def get_logit_diff(model, input_tensor, correct_class, target_class):
     if logits.ndim == 3:
         # Take only the last token's logits
         logits = logits[:, -1]
-    return ((logits[range(len(logits)), correct_class] - logits[range(len(logits)), target_class]).squeeze(1).cpu().numpy(), 
-            torch.nn.functional.cross_entropy(logits, correct_class.squeeze(1).to(logits.device), reduction='none').cpu().numpy(), 
-            torch.nn.functional.cross_entropy(logits, target_class.squeeze(1).to(logits.device), reduction='none').cpu().numpy())
+    if correct_class.ndim == 2:
+        correct_class = correct_class.squeeze(1)
+        target_class = target_class.squeeze(1)
+    return ((logits[range(len(logits)), correct_class] - logits[range(len(logits)), target_class]).cpu().numpy(), 
+            torch.nn.functional.cross_entropy(logits, correct_class.to(logits.device), reduction='none').cpu().numpy(), 
+            torch.nn.functional.cross_entropy(logits, target_class.to(logits.device), reduction='none').cpu().numpy())
+
+def get_loss(model, input_tensor, correct_class):
+    with torch.no_grad():
+        output = model(input_tensor)
+    logits = get_logits(output)
+    if logits.ndim == 3:
+        logits = logits[:, -1]
+    if correct_class.ndim == 2:
+        correct_class = correct_class.squeeze(1)
+    return (torch.nn.functional.cross_entropy(logits, correct_class.to(logits.device), reduction='none').cpu().numpy(),)
 
 def get_logits(model_output: torch.Tensor | ModelOutput, out_slice: Tuple[slice | int, ...] = slice(None)) -> torch.Tensor:
     if isinstance(model_output, ModelOutput):

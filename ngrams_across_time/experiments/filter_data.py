@@ -10,7 +10,7 @@ from torch import Tensor
 from ngrams_across_time.utils.data import ZippedDataset
 from ngrams_across_time.utils.tensor_db import TensorDatabase
 from ngrams_across_time.image.image_data_types import image_hash
-from ngrams_across_time.language.filter_ngrams import save_ngram_corruptions
+from ngrams_across_time.language.collect_language_metrics import save_ngram_corruptions
 
 def select_above_cutpoint(matrix: Tensor, cutpoint: float):
     mask = matrix > cutpoint

@@ -21,7 +21,7 @@ class ZippedDataset(TorchDataset):
         )
 
     def __getitem__(self, idx: int):
-        return self.target_dataset[idx], self.low_order_dataset[idx], self.high_order_dataset[idx], self.base_dataset[idx]
+        return {'target': self.target_dataset[idx], 'low_order': self.low_order_dataset[idx], 'high_order': self.high_order_dataset[idx], 'base': self.base_dataset[idx]}
     
     def __len__(self) -> int:
         return len(self.target_dataset)

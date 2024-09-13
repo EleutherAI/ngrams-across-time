@@ -7,8 +7,8 @@ from ngrams_across_time.experiments.load_models import load_models
 
 def main():
     parser = argparse.ArgumentParser(description="Run analysis on language or image models")
-    parser.add_argument("model_name", nargs='?', default="", help="Name of the model to analyze")
-    parser.add_argument("dataset", nargs='?', default="", help="Name of the dataset to use")
+    parser.add_argument("--model_name", type=str, required=True, help='Name of the model')
+    parser.add_argument("--dataset", type=str, help='Name of the dataset')
     parser.add_argument("--modality", choices=["language", "image"], default="language", help="Modality of the model")
     parser.add_argument("--start", type=int, default=1, help="Start checkpoint")
     parser.add_argument("--end", type=int, default=16384, help="End checkpoint")

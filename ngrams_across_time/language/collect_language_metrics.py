@@ -1,29 +1,23 @@
-from argparse import ArgumentParser
-import math
-from pathlib import Path
 from typing import List, Literal
+import pandas as pd
+import pickle
+import numpy as np
 
+from datasets import Dataset
 from tqdm import tqdm
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-import torch.multiprocessing as mp
-from transformers import AutoTokenizer
-
-from ngrams_across_time.language.ngram_datasets import get_ngram_datasets
-from ngrams_across_time.language.hf_client import get_model_checkpoints, get_basic_pythia_model_names, get_pythia_model_size, load_with_retries
 
 from ngrams_across_time.utils.divergences import kl_divergence_log_space, js_divergence_log_space
-from ngrams_across_time.utils.tensor_db import TensorDatabase
 
-def collect_language_divergences(model, dataloader, order_index, metrics: List[Literal['kl', 'js', 'loss']], vocab_size: int):
+def collect_language_divergences(model, dataloader, relative_order: str, metrics: List[Literal['kl', 'js', 'loss']], vocab_size: int):
     model.eval()
     device = model.device
     divergences = {metric: [] for metric in metrics}
     with torch.no_grad():
         for batch in tqdm(dataloader):
-            tokens_batch = batch[-1]['input_ids']
-            ngram_batch = batch[order_index]
+            tokens_batch = batch['base']['input_ids']
+            ngram_batch = batch[relative_order]
             tokens = tokens_batch.to(device)
             logits = model(tokens).logits[:, :, :vocab_size]
 
@@ -45,116 +39,29 @@ def collect_language_divergences(model, dataloader, order_index, metrics: List[L
     return {metric: torch.cat(div_list, dim=0) for metric, div_list in divergences.items()}
 
 
-# TODO pass val and ngrams separately
-def process_datasets(
-        revisions: dict[int, str], 
-        model_name: str, 
-        data: dict[str | int, DataLoader], 
-        vocab_size: int,
-        db_path: Path, 
-        key='input_ids',
-    ):
+def save_ngram_corruptions(df: pd.DataFrame, model: str, start: int, end: int, n: int):
+    bigrams_path = "/mnt/ssd-1/lucia/features-across-time/data/pile-deduped/bigrams.pkl"
+    with open(bigrams_path, "rb") as f:
+        bigram_counts = pickle.load(f).toarray().astype(np.float32)
+        unigram_counts = torch.tensor(bigram_counts).sum(dim=1).cuda()
+        del bigram_counts
 
-    # Initialise results structure
-    result = {
-        ngram: {
-            step: {
-                'kl': torch.zeros(1024, 2049),
-                'js': torch.zeros(1024, 2049),
-            }
-            for step in revisions.keys()
-        }
-        for ngram in data.keys() if isinstance(ngram, int)
+    ngram_data = {
+        'target': [],
+        'low_order': []
     }
-    loss = torch.zeros(1024, 2048)
+    unique_ngrams = list(set(tuple(x) for x in df['example']))
+    num_samples = 100
+    for unique_ngram in unique_ngrams:
+        end_token = torch.tensor(unique_ngram[-1], device='cuda')
+        start_tokens = torch.multinomial(unigram_counts, (n - 1) * num_samples, replacement=True)
+        # TODO could select these to be n-grams that aren't learned between checkpoints
+        corrupt_ngrams = torch.cat([start_tokens.view(num_samples, n - 1), end_token.repeat(num_samples, 1)], dim=1)
 
-    # Collect data
-    for step, revision in revisions.items():
-        model_size = get_pythia_model_size(model_name)
-        model = load_with_retries(model_name, revision, model_size)
-        if not model:
-            continue
+        ngram_data['target'].append(unique_ngram)
+        ngram_data['low_order'].append(corrupt_ngrams.cpu().numpy())
 
-        ngram_iters = {k: iter(data[k]) for k in result.keys()}     
-        for j, batch in tqdm(enumerate(data['val']), total=1024):
-            tokens = batch[key].cuda()
-            batch_size = len(tokens)
-            logits = model(tokens).logits[:, :, :vocab_size]
-
-            if loss is not None: 
-                batch_loss = F.cross_entropy(logits[:, :-1].reshape(-1, vocab_size), tokens[:, 1:].reshape(-1), reduction='none')
-                loss[
-                    j * batch_size : (j * batch_size) + batch_size
-                ] = batch_loss.detach().cpu().reshape(batch_size, -1)
-                
-            del batch, tokens
-            
-            for n, loader in ngram_iters.items():
-                try:
-                    ngram_logprobs = next(loader).cuda()
-                    result[n][step]['kl'][
-                        j * batch_size : (j * batch_size) + batch_size
-                    ] = kl_divergence_log_space(logits, ngram_logprobs, dim=-1).detach().cpu()
-                    result[n][step]['js'][
-                        j * batch_size : (j * batch_size) + batch_size
-                    ] = js_divergence_log_space(logits, ngram_logprobs, dim=-1).detach().cpu()
-                    
-                    del ngram_logprobs
-                except StopIteration:
-                    print(f"Loader {loader} is exhausted")
-    
-    # Save results
-    db = TensorDatabase(str(db_path / "tensor_db"), str(db_path / "tensors"))
-    for ngram, ngram_data in result.items():
-        for step, metrics in ngram_data.items():
-            for metric, tensor in metrics.items():
-                tags = {
-                    'model': model_name,
-                    'revision': revisions[step],
-                    'step': step,
-                    'metric': metric,
-                    'ngram': ngram,
-                    'num-shards': 2,
-                }
-                db.add_tensor(tensor, tags)
-    tags = {
-        'model': model_name,
-        'revision': revisions[step],
-        'step': step,
-        'metric': 'loss',
-    }
-    db.add_tensor(loss, tags)
-    db.close()
-
-def collect_model_data(
-        model_name: str,
-        start: int,
-        end: int,
-        batch_size: int,
-        n: list[int],
-        db_path: Path,
-        include_intermediate: bool = False,
-        max_ds_len: int = 1024, # debug parameter
-):
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # This is correct; tokenizer.vocab_size is incorrect.
-    vocab_size = len(tokenizer)
-
-    # Load n-gram model distributions
-    data: dict[str | int, DataLoader] = {
-        k: DataLoader(v, batch_size=batch_size, shuffle=False)
-        for k, v in get_ngram_datasets(vocab_size, ngrams=n, max_ds_len=max_ds_len).items()
-    }
-
-    checkpoints = get_model_checkpoints(model_name)
-    if not checkpoints:
-        raise ValueError('No checkpoints found')
-    ranged_checkpoints = {k: v for k, v in checkpoints.items() if start <= k <= end}
-    ranged_checkpoints = dict(sorted(ranged_checkpoints.items()))
-    if not include_intermediate:
-        keys = list(ranged_checkpoints.keys())
-        ranged_checkpoints = {start: ranged_checkpoints[keys[0]], end: ranged_checkpoints[keys[-1]]}
-    print(ranged_checkpoints)
-    
-    process_datasets(ranged_checkpoints, model_name, data, vocab_size=vocab_size, db_path=db_path)
+    # create huggingface dataset where clean is each unique n-gram and corrupt is the dataset of corrupt ngrams
+    dataset_name = f"{n}-grams-{start}-{end}-{model.replace('/', '--')}"
+    dataset = Dataset.from_dict(ngram_data)
+    dataset.save_to_disk(dataset_name)    

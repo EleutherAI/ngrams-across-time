@@ -2,12 +2,10 @@ import os
 from typing import Dict
 
 from pathlib import Path
-import pandas as pd
 
 from ngrams_across_time.utils.utils import assert_type
 
 import torch
-from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from datasets import load_from_disk, Dataset
 from transformer_lens import HookedTransformer
@@ -40,11 +38,16 @@ def get_ngram_dataset(
     if patchable:
         return get_patchable_ngram_dataset(model_name, start, end, order)
     else:
-        return get_ngram_dist_dataset(vocab_size, order, max_ds_len)
+        orders = [order - 1, order, order + 1]
+        ngram_dists = get_ngram_dists(vocab_size, orders, max_ds_len)
+        return ZippedDataset(
+            target_dataset=ngram_dists[order],
+            low_order_dataset=ngram_dists[order - 1],
+            high_order_dataset=ngram_dists[order + 1],
+            base_dataset=load_token_data(max_ds_len),
+        )
 
-def get_ngram_dist_dataset(vocab_size: int, order: int, max_ds_len: int = 1024, patchable: bool = False):
-    ngrams = [order - 1, order, order + 1]
-    val = load_token_data(max_ds_len)
+def get_ngram_dists(vocab_size: int, orders: list[int], max_ds_len: int = 1024):
 
     ngram_data = {
         i: NgramDataset(
@@ -53,20 +56,15 @@ def get_ngram_dist_dataset(vocab_size: int, order: int, max_ds_len: int = 1024, 
             max_ds_len,
             i
         )
-        for i in ngrams
+        for i in orders
     }
     
-    return ZippedDataset(
-        target_dataset=ngram_data[order],
-        low_order_dataset=ngram_data[order - 1],
-        high_order_dataset=ngram_data[order + 1],
-        base_dataset=val,
-    )
+    return ngram_data
 
 def get_patchable_ngram_dataset(model_name: str, start: int, end: int, order: int) -> Dict[str, PromptDataset]:
     dataset_name = f"{order}-grams-{start}-{end}-{model_name.replace('/', '--')}"
     if not Path(dataset_name).exists():
-        f"Prompt dataset not found - use select_language_prompts.py to generate."
+        f"Prompt dataset not found - to generate use run_collect_and_filter.py --modality language --start {start} --end {end} --order {order} --model_name {model_name}"
     dataset = load_from_disk(dataset_name) # type: ignore
     dataset = assert_type(Dataset, dataset)
 

@@ -24,8 +24,16 @@ def score_circuits(quantiles, edge_scores, source_model, dest_model, dataloader,
     device = next(dest_model.parameters()).device
     results = []
 
+    if isinstance(label, torch.Tensor):
+        label = ', '.join(map(str, label.numpy()))
+    elif isinstance(label, int):
+        label = str(label)
+    else:
+        raise ValueError(f'Label is neither a torch.Tensor nor an int nor a string: {type(label)}')
+
     corrupt_ablations = batch_src_ablations(source_model, dataloader, AblationType.RESAMPLE, 'corrupt')
     clean_ablations = batch_src_ablations(source_model, dataloader, AblationType.RESAMPLE, 'clean')
+    
     for quantile, threshold in quantiles:
         keep_edges = []
         top_edges_with_scores = []
@@ -65,6 +73,7 @@ def score_circuits(quantiles, edge_scores, source_model, dest_model, dataloader,
             dest_corrupt_metrics = get_metrics(dest_model, corrupt_input, correct_class, target_class)
             
             # Patched young model results
+            # TODO: patch_mode calls are very expensive for image models
             with patch_mode(dest_model, corrupt_ablations[batch.key], keep_edges):
                 patched_dest_corrupt_metrics = get_metrics(dest_model, corrupt_input, correct_class, target_class)
             with patch_mode(dest_model, clean_ablations[batch.key], keep_edges):
@@ -72,7 +81,7 @@ def score_circuits(quantiles, edge_scores, source_model, dest_model, dataloader,
 
             batch_results = {
                 'quantile': quantile,
-                'label': ','.join(map(str, label.numpy())),
+                'label': label,
                 'n_edges': len(keep_edges)
             }
 

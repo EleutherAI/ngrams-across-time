@@ -19,6 +19,9 @@ from concept_erasure import QuadraticFitter, QuadraticEditor
 from concept_erasure.quantile import QuantileNormalizer
 from concept_erasure.utils import assert_type
 
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(MODULE_DIR))
+
 from ngrams_across_time.image.image_data_types import (
     ConceptEditedDataset,
     QuantileNormalizedDataset,
@@ -89,14 +92,15 @@ def get_image_dataset(
         raise ValueError(f"Invalid return_type: {return_type}")
     if patchable:
         assert order is not None
-        data_index_path = Path(f"data/filtered/filtered-{order}-data-{model_name.replace('/', '--')}-{start_step}-{end_step}.csv")
-        ds = get_patchable_image_dataset(ds, data_index_path)
+        data_index_path = Path(f"{PROJECT_ROOT}/data/filtered/filtered-{order}-data-{model_name.replace('/', '--')}-{start_step}-{end_step}.csv")
+        ds = get_patchable_image_dataset(ds, data_index_path, filter = return_type == 'edited')
     return ds
 
 
-def get_patchable_image_dataset(ds: ZippedDataset, data_index_path: Path) -> Dict[int, PromptDataset]:
-    data_indices = pd.read_csv(data_index_path)
-    ds = ds.select(data_indices['sample_idx'].tolist())
+def get_patchable_image_dataset(ds: ZippedDataset, data_index_path: Path, filter: bool = False) -> Dict[int, PromptDataset]:
+    if filter:
+        data_indices = pd.read_csv(data_index_path)
+        ds = ds.select(data_indices['sample_idx'].tolist())
 
     result = {}
     for target, low in zip(ds.target_dataset, ds.low_order_dataset):
@@ -201,11 +205,11 @@ def get_synthetic_datasets(dataset: DatasetDict, dataset_name: str):
     X, Y, X_val, Y_val, fitter, normalizer, class_probs, val, c, h, w, seed = prepare_common_data(dataset, dataset_name)
 
     gaussian = GaussianMixture(
-        class_probs, len(val), means=fitter.mean_x.cpu(), covs=fitter.sigma_xx.cpu(), shape=(c, h, w)
+        class_probs, len(val), means=fitter.mean_x.cpu(), covs=fitter.sigma_xx.cpu(), shape=(c, h, w), seed=seed
     )
 
     val_sets = {
-        "ics_dataset": IndependentCoordinateSampler(class_probs, normalizer, len(val)),
+        "ics_dataset": IndependentCoordinateSampler(class_probs, normalizer, len(val), seed=seed),
         "gauss_dataset": gaussian,
         "normal_dataset": val,
     }

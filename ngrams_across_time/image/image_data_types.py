@@ -127,24 +127,38 @@ class IndependentCoordinateSampler:
     editor: QuantileNormalizer
     size: int
 
+    def __init__(self, class_probs: Tensor, editor: QuantileNormalizer, size: int, seed: Optional[int] = None):
+        self.class_probs = class_probs
+        self.editor = editor
+        self.size = size
+        self.data = []
+        if seed is not None:
+            torch.manual_seed(seed)
+        for i in range(self.size):
+            y = torch.multinomial(self.class_probs, 1).squeeze()
+            lut = self.editor.lut[y]
+
+            indices = torch.randint(0, lut.shape[-1], lut[..., 0].shape, device=lut.device)
+            x = lut.gather(-1, indices[..., None]).squeeze(-1)
+            self.data.append({
+                "pixel_values": x,
+                "label": y,
+            })
+
     def select(self, idx: List[int]):
-        return IndependentCoordinateSampler(
+        subset = IndependentCoordinateSampler(
             class_probs=self.class_probs,
             editor=self.editor,
             size=len(idx)
         )
+        subset.data = [self.data[i] for i in idx]
+        return subset
 
-    def __getitem__(self, _: int) -> dict[str, Tensor]:
-        y = torch.multinomial(self.class_probs, 1).squeeze()
-        lut = self.editor.lut[y]
+    def __getitem__(self, idx: int) -> dict[str, Tensor]:
+        if idx >= self.size:
+            raise IndexError(f"Index {idx} out of bounds for size {self.size}")
 
-        indices = torch.randint(0, lut.shape[-1], lut[..., 0].shape, device=lut.device)
-        x = lut.gather(-1, indices[..., None]).squeeze(-1)
-
-        return {
-            "pixel_values": x,
-            "label": y,
-        }
+        return self.data[idx]
 
     def __len__(self) -> int:
         return self.size
@@ -159,6 +173,7 @@ class GaussianMixture:
         dists: Optional[List[MultivariateNormal]] = None,
         shape: tuple[int, int, int] = (3, 32, 32),
         trf: Callable = lambda x: x,
+        seed: Optional[int] = None
     ):
         assert means is not None or dists is not None
         self.class_probs = class_probs
@@ -169,25 +184,31 @@ class GaussianMixture:
         self.shape = shape
         self.size = size
         self.trf = trf
+        self.data = []
+        if seed is not None:
+            torch.manual_seed(seed)
+        for i in range(self.size):
+            y = torch.multinomial(self.class_probs, 1).squeeze()
+            self.data.append({
+                "pixel_values": self.dists[y].sample().reshape(self.shape),
+                "label": y,
+            })
 
     def select(self, idx: List[int]):
-        return GaussianMixture(
+        subset = GaussianMixture(
             class_probs=self.class_probs,
             dists=self.dists,
             shape=self.shape,
             size=len(idx)
         )
+        subset.data = [self.data[i] for i in idx]
+        return subset
 
     def __getitem__(self, idx: int) -> dict[str, Tensor]:
         if idx >= self.size:
             raise IndexError(f"Index {idx} out of bounds for size {self.size}")
 
-        y = torch.multinomial(self.class_probs, 1).squeeze()
-        x = self.dists[y].sample().reshape(self.shape)
-        return {
-            "pixel_values": self.trf(x),
-            "label": y,
-        }
+        return self.data[idx]
 
     def __len__(self) -> int:
         return self.size

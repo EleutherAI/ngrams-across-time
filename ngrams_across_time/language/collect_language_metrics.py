@@ -10,14 +10,14 @@ import torch.nn.functional as F
 
 from ngrams_across_time.utils.divergences import kl_divergence_log_space, js_divergence_log_space
 
-def collect_language_divergences(model, dataloader, relative_order: str, metrics: List[Literal['kl', 'js', 'loss']], vocab_size: int):
+def collect_language_divergences(model, dataloader, order_name: str, metrics: List[Literal['kl', 'js', 'loss']], vocab_size: int):
     model.eval()
     device = model.device
     divergences = {metric: [] for metric in metrics}
     with torch.no_grad():
         for batch in tqdm(dataloader):
             tokens_batch = batch['base']['input_ids']
-            ngram_batch = batch[relative_order]
+            ngram_batch = batch[order_name]
             tokens = tokens_batch.to(device)
             logits = model(tokens).logits[:, :, :vocab_size]
 

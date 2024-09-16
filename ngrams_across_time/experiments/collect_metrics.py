@@ -16,7 +16,12 @@ def get_metric_function(
     batch_size: int = 32,
     target_order: int = 2,
 ):
-    orders = [target_order - 1, target_order, target_order + 1]
+    orders = {
+        'low_order': target_order - 1,
+        'target_order': target_order,
+        'high_order': target_order + 1,
+        'base': None
+    }
     if modality == 'language':
         models, vocab_size = models
 
@@ -37,7 +42,7 @@ def get_metric_function(
         else:
             metrics = ['loss']
 
-        for order_index, order in enumerate(orders):
+        for order_name, order in orders.items():
             for metric in metrics:
                 tags.update({
                     'metric': metric,
@@ -48,18 +53,20 @@ def get_metric_function(
                     if metric == 'loss':
                         tags['order'] = 'baseline'
                 
-                metric_results[metric] = db.query_last(**tags)['tensor']
-                if metric_results[metric] is None:
+                db_results = db.query_last(**tags)
+                if db_results is None:
                     missing_metrics.append(metric)
+                else:
+                    metric_results[metric] = db_results['tensor']
                 
             if len(missing_metrics) > 0:
                 model = models[checkpoint]
 
                 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
                 if modality == 'language':
-                    metric_results.update(collect_language_divergences(model, dataloader, order_index, missing_metrics, vocab_size))
+                    metric_results.update(collect_language_divergences(model, dataloader, order_name, missing_metrics, vocab_size))
                 else:
-                    metric_results.update(collect_image_losses(model, dataloader, order_index, missing_metrics))
+                    metric_results.update(collect_image_losses(model, dataloader, order_name, missing_metrics))
                 for metric, tensor in metric_results.items():
                     if metric in missing_metrics:
                         tags.update({

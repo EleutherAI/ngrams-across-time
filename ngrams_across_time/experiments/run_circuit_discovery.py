@@ -5,7 +5,6 @@ from tqdm import tqdm
 import pandas as pd
 import torch
 from einops import rearrange
-import itertools
 
 from auto_circuit.prune_algos.mask_gradient import mask_gradient_prune_scores
 from auto_circuit.data import PromptDataLoader
@@ -18,11 +17,13 @@ from auto_circuit.utils.graph_utils import patch_mode
 from ngrams_across_time.experiments.load_models import load_models
 from ngrams_across_time.utils.utils import get_logit_diff, get_loss
 
+from ngrams_across_time.image.image_data_types import image_hash
 
-
-def score_circuits(quantiles, edge_scores, source_model, dest_model, dataloader, label, mode='multitarget'):
+def score_circuits(quantiles, edge_scores, source_model, dest_model, dataset_dict, label, mode='multitarget', order=2):
     device = next(dest_model.parameters()).device
     results = []
+    dataloader = PromptDataLoader(dataset_dict[label], seq_len=order - 1, diverge_idx=0)
+
 
     if isinstance(label, torch.Tensor):
         label = ', '.join(map(str, label.numpy()))
@@ -30,13 +31,11 @@ def score_circuits(quantiles, edge_scores, source_model, dest_model, dataloader,
         label = str(label)
     else:
         raise ValueError(f'Label is neither a torch.Tensor nor an int nor a string: {type(label)}')
-
-    corrupt_ablations = batch_src_ablations(source_model, dataloader, AblationType.RESAMPLE, 'corrupt')
-    clean_ablations = batch_src_ablations(source_model, dataloader, AblationType.RESAMPLE, 'clean')
-    
+   
     for quantile, threshold in quantiles:
         keep_edges = []
         top_edges_with_scores = []
+        random_edges = []
         for module, scores in tqdm(edge_scores.items(), 'compiling edge scores'):
             sequential = scores.ndim == 3
             if not sequential:
@@ -50,73 +49,96 @@ def score_circuits(quantiles, edge_scores, source_model, dest_model, dataloader,
                 seq_pos = seq_pos if sequential else None
                 keep_edges.extend([dest_model.edge_dict[seq_pos][i] for i in high_score_indices])
                 top_edges_with_scores.extend([(dest_model.edge_dict[seq_pos][i].name, score[i].item()) for i in high_score_indices])
+                random_edges.extend([dest_model.edge_dict[seq_pos][i] for i in torch.randperm(score.shape[0])[:len(keep_edges)]])
 
+        # Precompute patch masks
+        with patch_mode(dest_model, None, keep_edges) as patch_mask:
+            pass
 
-        for batch in tqdm(dataloader, f'testing patch results on {quantile} quantile edges'):
-            clean_input = batch.clean.to(device)
-            corrupt_input = batch.corrupt.to(device)
-            correct_class = batch.answers
+        for metric_label, prompt_ds in dataset_dict.items():
+            dataloader = PromptDataLoader(prompt_ds, seq_len=order - 1, diverge_idx=0, batch_size=32)
 
-            if mode == 'multitarget':
-                target_class = batch.wrong_answers
-                get_metrics = get_logit_diff
-            else:
-                target_class = None
-                get_metrics = lambda model, input, correct_class, _: get_loss(model, input, correct_class)
+            corrupt_ablations = batch_src_ablations(source_model, dataloader, AblationType.RESAMPLE, 'corrupt')
+            clean_ablations = batch_src_ablations(source_model, dataloader, AblationType.RESAMPLE, 'clean')
 
-            # Young model results
-            source_clean_metrics = get_metrics(source_model, clean_input, correct_class, target_class)
-            source_corrupt_metrics = get_metrics(source_model, corrupt_input, correct_class, target_class)
-            
-            # Old model results
-            dest_clean_metrics = get_metrics(dest_model, clean_input, correct_class, target_class)
-            dest_corrupt_metrics = get_metrics(dest_model, corrupt_input, correct_class, target_class)
-            
-            # Patched young model results
-            # TODO: patch_mode calls are very expensive for image models
-            with patch_mode(dest_model, corrupt_ablations[batch.key], keep_edges):
-                patched_dest_corrupt_metrics = get_metrics(dest_model, corrupt_input, correct_class, target_class)
-            with patch_mode(dest_model, clean_ablations[batch.key], keep_edges):
-                patched_dest_clean_metrics = get_metrics(dest_model, clean_input, correct_class, target_class)
+            for batch in tqdm(dataloader, f'testing patch results on {quantile} quantile edges'):
+                clean_input = batch.clean.to(device)
+                corrupt_input = batch.corrupt.to(device)
+                correct_class = batch.answers
 
-            batch_results = {
-                'quantile': quantile,
-                'label': label,
-                'n_edges': len(keep_edges)
-            }
+                if mode == 'multitarget':
+                    target_class = batch.wrong_answers
+                    get_metrics = get_logit_diff
+                else:
+                    target_class = None
+                    get_metrics = lambda model, input, correct_class, _: get_loss(model, input, correct_class)
 
-            if mode == 'multitarget':
-                batch_results.update({
-                    'source_clean_diff': source_clean_metrics[0],
-                    'source_corrupt_diff': source_corrupt_metrics[0],
-                    'source_clean_loss': source_clean_metrics[1],
-                    'source_corrupt_loss': source_corrupt_metrics[1],
-                    'source_clean_off_loss': source_clean_metrics[2],
-                    'source_corrupt_off_loss': source_corrupt_metrics[2],
-                    'dest_clean_diff': dest_clean_metrics[0],
-                    'dest_corrupt_diff': dest_corrupt_metrics[0],
-                    'dest_clean_loss': dest_clean_metrics[1],
-                    'dest_corrupt_loss': dest_corrupt_metrics[1],
-                    'dest_clean_off_loss': dest_clean_metrics[2],
-                    'dest_corrupt_off_loss': dest_corrupt_metrics[2],
-                    'patched_dest_clean_diff': patched_dest_clean_metrics[0],
-                    'patched_dest_corrupt_diff': patched_dest_corrupt_metrics[0],
-                    'patched_dest_clean_loss': patched_dest_clean_metrics[1],
-                    'patched_dest_corrupt_loss': patched_dest_corrupt_metrics[1],
-                    'patched_dest_clean_off_loss': patched_dest_clean_metrics[2],
-                    'patched_dest_corrupt_off_loss': patched_dest_corrupt_metrics[2],
-                })
-            else:
-                batch_results.update({
-                    'source_clean_loss': source_clean_metrics[0],
-                    'source_corrupt_loss': source_corrupt_metrics[0],
-                    'dest_clean_loss': dest_clean_metrics[0],
-                    'dest_corrupt_loss': dest_corrupt_metrics[0],
-                    'patched_dest_clean_loss': patched_dest_clean_metrics[0],
-                    'patched_dest_corrupt_loss': patched_dest_corrupt_metrics[0],
-                })
+                # Young model results
+                source_clean_metrics = get_metrics(source_model, clean_input, correct_class, target_class)
+                source_corrupt_metrics = get_metrics(source_model, corrupt_input, correct_class, target_class)
+                
+                # Old model results
+                dest_clean_metrics = get_metrics(dest_model, clean_input, correct_class, target_class)
+                dest_corrupt_metrics = get_metrics(dest_model, corrupt_input, correct_class, target_class)
+                
+                # Patched young model results
+                # TODO: patch_mode calls are very expensive for image models
+                with patch_mode(dest_model, corrupt_ablations[batch.key], keep_edges, None, patch_mask):
+                    patched_dest_corrupt_metrics = get_metrics(dest_model, corrupt_input, correct_class, target_class)
+                with patch_mode(dest_model, clean_ablations[batch.key], keep_edges, None, patch_mask):
+                    patched_dest_clean_metrics = get_metrics(dest_model, clean_input, correct_class, target_class)
+                with patch_mode(dest_model, clean_ablations[batch.key], random_edges, None, patch_mask):
+                    patched_rand_dest_clean_metrics = get_metrics(dest_model, clean_input, correct_class, target_class)
+                with patch_mode(dest_model, corrupt_ablations[batch.key], random_edges, None, patch_mask):
+                    patched_rand_dest_corrupt_metrics = get_metrics(dest_model, corrupt_input, correct_class, target_class)
 
-            results.append(pd.DataFrame(batch_results))
+                batch_results = {
+                    'quantile': quantile,
+                    'edge_score_label': label,
+                    'n_edges': len(keep_edges),
+                    'metric_label': metric_label,
+                }
+
+                if mode == 'multitarget':
+                    batch_results.update({
+                        'source_clean_diff': source_clean_metrics[0],
+                        'source_corrupt_diff': source_corrupt_metrics[0],
+                        'source_clean_loss': source_clean_metrics[1],
+                        'source_corrupt_loss': source_corrupt_metrics[1],
+                        'source_clean_off_loss': source_clean_metrics[2],
+                        'source_corrupt_off_loss': source_corrupt_metrics[2],
+                        'dest_clean_diff': dest_clean_metrics[0],
+                        'dest_corrupt_diff': dest_corrupt_metrics[0],
+                        'dest_clean_loss': dest_clean_metrics[1],
+                        'dest_corrupt_loss': dest_corrupt_metrics[1],
+                        'dest_clean_off_loss': dest_clean_metrics[2],
+                        'dest_corrupt_off_loss': dest_corrupt_metrics[2],
+                        'patched_dest_clean_diff': patched_dest_clean_metrics[0],
+                        'patched_dest_corrupt_diff': patched_dest_corrupt_metrics[0],
+                        'patched_dest_clean_loss': patched_dest_clean_metrics[1],
+                        'patched_dest_corrupt_loss': patched_dest_corrupt_metrics[1],
+                        'patched_dest_clean_off_loss': patched_dest_clean_metrics[2],
+                        'patched_dest_corrupt_off_loss': patched_dest_corrupt_metrics[2],
+                        'patched_rand_dest_clean_diff': patched_rand_dest_clean_metrics[0],
+                        'patched_rand_dest_corrupt_diff': patched_rand_dest_corrupt_metrics[0],
+                        'patched_rand_dest_clean_loss': patched_rand_dest_clean_metrics[1],
+                        'patched_rand_dest_corrupt_loss': patched_rand_dest_corrupt_metrics[1],
+                        'patched_rand_dest_clean_off_loss': patched_rand_dest_clean_metrics[2],
+                        'patched_rand_dest_corrupt_off_loss': patched_rand_dest_corrupt_metrics[2],
+                    })
+                else:
+                    batch_results.update({
+                        'source_clean_loss': source_clean_metrics[0],
+                        'source_corrupt_loss': source_corrupt_metrics[0],
+                        'dest_clean_loss': dest_clean_metrics[0],
+                        'dest_corrupt_loss': dest_corrupt_metrics[0],
+                        'patched_dest_clean_loss': patched_dest_clean_metrics[0],
+                        'patched_dest_corrupt_loss': patched_dest_corrupt_metrics[0],
+                        'patched_rand_dest_clean_loss': patched_rand_dest_clean_metrics[0],
+                        'patched_rand_dest_corrupt_loss': patched_rand_dest_corrupt_metrics[0],
+                    })
+
+                results.append(pd.DataFrame(batch_results))
 
     return pd.concat(results)
 
@@ -192,18 +214,20 @@ def main(model_name: str, start: int, end: int, modality: str, order: int, datas
             
                 fig = go.Figure(data=sankey)
                 fig.write_image(f"{label}_viz_{threshold}.png", scale=4)
+
         circuit_scores.append(score_circuits(
             zip(quantiles, circuit_data["quantile_thresholds"][-1]), 
             circuit_data["daat_edge_prune_scores"], 
             ablation_model, 
             base_model, 
-            dataloader, 
+            dataset_dict,
             label,
-            mode='single'
+            mode='single',
+            order=order
         ))
 
     circuit_scores = pd.concat(circuit_scores)
-    circuit_scores.to_csv(f"{model_name.replace('/', '--')}_circuit_scores.csv", index=False)
+    circuit_scores.to_csv(f"{model_name.replace('/', '--')}_circuit_scores_daat.csv", index=False)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Circuit Discovery')

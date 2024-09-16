@@ -6,13 +6,13 @@ import torch
 from ngrams_across_time.image.image_data_types import image_hash
 from ngrams_across_time.utils.divergences import kl_divergence_log_space, js_divergence_log_space
 
-def collect_image_losses(model, dataloader, order_index, metrics: Literal['loss'] = 'loss'):
+def collect_image_losses(model, dataloader, order_name: str, metrics: Literal['loss'] = 'loss'):
     model.eval()
     device = model.device
     losses = {metric: [] for metric in metrics}
     with torch.no_grad():
         for batch in dataloader:
-                batch = batch[order_index]
+                batch = batch['target']
                 x_target, y_target = batch['pixel_values'].to(device), batch['label'].to(device)
                 logits_target = model(x_target).logits
                 losses['loss'].append(torch.nn.functional.cross_entropy(logits_target, y_target, reduction='none'))

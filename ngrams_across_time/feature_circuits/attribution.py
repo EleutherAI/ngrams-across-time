@@ -1,16 +1,20 @@
 from collections import namedtuple
+
 import torch as t
 from tqdm import tqdm
 from numpy import ndindex
-from typing import Dict, Union
-from ngrams_across_time.feature_circuits.activation_utils import SparseAct
+from typing import Dict, Union, Any
+from sae import Sae
+from sae.sae import ForwardOutput
+import nnsight
+from ngrams_across_time.feature_circuits.dense_act import DenseAct, to_dense
 
 DEBUGGING = False
 
 if DEBUGGING:
-    tracer_kwargs = {'validate' : True, 'scan' : True}
+    tracer_kwargs = {'validate' : True, 'scan': True}
 else:
-    tracer_kwargs = {'validate' : False, 'scan' : False}
+    tracer_kwargs = {}
 
 EffectOut = namedtuple('EffectOut', ['effects', 'deltas', 'grads', 'total_effect'])
 
@@ -19,14 +23,14 @@ def _pe_attrib(
         patch,
         model,
         submodules,
-        dictionaries,
+        dictionaries: dict[Any, Sae],
         metric_fn,
         metric_kwargs=dict(),
 ):
-    
+    num_latents = next(iter(dictionaries.values())).num_latents
     # first run through a test input to figure out which hidden states are tuples
     is_tuple = {}
-    with model.trace("_"):
+    with model.scan("_"):
         for submodule in submodules:
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
@@ -38,9 +42,11 @@ def _pe_attrib(
             x = submodule.output
             if is_tuple[submodule]:
                 x = x[0]
-            x_hat, f = dictionary(x, output_features=True) # x_hat implicitly depends on f
+
+            x_hat, f = dictionary(x, output_features=True).sae_out # x_hat implicitly depends on f
             residual = x - x_hat
-            hidden_states_clean[submodule] = SparseAct(act=f, res=residual).save()
+
+            hidden_states_clean[submodule] = DenseAct(act=to_dense(f.top_acts, f.top_indices, num_latents).save(), res=residual).save()
             grads[submodule] = hidden_states_clean[submodule].grad.save()
             residual.grad = t.zeros_like(residual)
             x_recon = x_hat + residual
@@ -49,14 +55,14 @@ def _pe_attrib(
             else:
                 submodule.output = x_recon
             x.grad = x_recon.grad
-        metric_clean = metric_fn(model, **metric_kwargs).save()
+        metric_clean = metric_fn(model.output, **metric_kwargs).save()
         metric_clean.sum().backward()
     hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
     grads = {k : v.value for k, v in grads.items()}
 
     if patch is None:
         hidden_states_patch = {
-            k : SparseAct(act=t.zeros_like(v.act), res=t.zeros_like(v.res)) for k, v in hidden_states_clean.items()
+            k : DenseAct(act=t.zeros_like(v.act), res=t.zeros_like(v.res)) for k, v in hidden_states_clean.items()
         }
         total_effect = None
     else:
@@ -67,10 +73,11 @@ def _pe_attrib(
                 x = submodule.output
                 if is_tuple[submodule]:
                     x = x[0]
-                x_hat, f = dictionary(x, output_features=True)
+                x_hat, f = dictionary(x, output_features=True).sae_out
                 residual = x - x_hat
-                hidden_states_patch[submodule] = SparseAct(act=f, res=residual).save()
-            metric_patch = metric_fn(model, **metric_kwargs).save()
+                dense = to_dense(f.top_acts, f.top_indices, num_latents).save()
+                hidden_states_patch[submodule] = DenseAct(act=dense, res=residual).save()
+            metric_patch = metric_fn(model.output, **metric_kwargs).save()
         total_effect = (metric_patch.value - metric_clean.value).detach()
         hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
 
@@ -87,67 +94,109 @@ def _pe_attrib(
     
     return EffectOut(effects, deltas, grads, total_effect)
 
+
 def _pe_ig(
         clean,
         patch,
         model,
         submodules,
-        dictionaries,
+        dictionaries: dict[Any, Sae],
         metric_fn,
         steps=10,
         metric_kwargs=dict(),
 ):
-    
-    # first run through a test input to figure out which hidden states are tuples
+    num_latents = next(iter(dictionaries.values())).num_latents
+    data = []
+    # first run through the fake inputs to figure out which hidden states are tuples
     is_tuple = {}
-    with model.trace("_"):
+    with model.scan("_"):
         for submodule in submodules:
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
     hidden_states_clean = {}
-    with model.trace(clean, **tracer_kwargs), t.no_grad():
-        for submodule in submodules:
+    # scan=True must be set; otherwise faketensor shapes aren't populated and 
+    # the reshape code will produce incorrect results (FAIL SILENTLY)
+    print(clean.shape)
+    with model.trace(clean, scan=True) as tracer, t.no_grad():
+        for i, submodule in enumerate(submodules):
             dictionary = dictionaries[submodule]
             x = submodule.output
             if is_tuple[submodule]:
-                x = x[0]
-            f = dictionary.encode(x)
-            x_hat = dictionary.decode(f)
-            residual = x - x_hat
-            hidden_states_clean[submodule] = SparseAct(act=f.save(), res=residual.save())
-        metric_clean = metric_fn(model, **metric_kwargs).save()
+                x = x[0].save()
+            if i == 1:
+                data.append(x.save())
+            
+            flat_f = nnsight.apply(dictionary.forward, x.flatten(0, 1))
+            f = ForwardOutput(
+                latent_acts=flat_f.latent_acts.reshape(x.shape[0], x.shape[1], -1),
+                latent_indices=flat_f.latent_indices.reshape(x.shape[0], x.shape[1], -1),
+                sae_out=flat_f.sae_out.reshape(x.shape[0], x.shape[1], -1),
+                fvu=flat_f.fvu,
+                auxk_loss=flat_f.auxk_loss,
+                multi_topk_fvu=flat_f.multi_topk_fvu
+            )
+
+            dense = to_dense(f.latent_acts, f.latent_indices, num_latents).save()
+            x_hat = dense @ dictionary.W_dec.mT.T
+            x_res = x - x_hat
+            if i == 1:
+                f_latent_acts_sum_clean = f.latent_acts.sum().save()
+
+            hidden_states_clean[submodule] = DenseAct(dense, x_res).save()
+        
+        logits = model.output.logits.save()
+        metric_clean = metric_fn(logits, **metric_kwargs).save()
+
     hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
 
     if patch is None:
         hidden_states_patch = {
-            k : SparseAct(act=t.zeros_like(v.act), res=t.zeros_like(v.res)) for k, v in hidden_states_clean.items()
+            k : DenseAct( 
+                act=t.zeros_like(v.act), 
+                res=t.zeros_like(v.res)
+            ) for k, v in hidden_states_clean.items()
         }
         total_effect = None
     else:
         hidden_states_patch = {}
-        with model.trace(patch, **tracer_kwargs), t.no_grad():
-            for submodule in submodules:
+        with model.trace(patch, scan=True), t.no_grad():
+            for i, submodule in enumerate(submodules):
                 dictionary = dictionaries[submodule]
                 x = submodule.output
                 if is_tuple[submodule]:
+                    # MLP activations are the same at every position
                     x = x[0]
-                f = dictionary.encode(x)
-                x_hat = dictionary.decode(f)
-                residual = x - x_hat
-                hidden_states_patch[submodule] = SparseAct(act=f.save(), res=residual.save())
-            metric_patch = metric_fn(model, **metric_kwargs).save()
+                if i == 1:
+                    data.append(x.save())
+
+                flat_f = nnsight.apply(dictionary.forward, x.flatten(0, 1))
+                f = ForwardOutput(
+                    latent_acts=flat_f.latent_acts.reshape(x.shape[0], x.shape[1], -1),
+                    latent_indices=flat_f.latent_indices.reshape(x.shape[0], x.shape[1], -1),
+                    sae_out=flat_f.sae_out.reshape(x.shape[0], x.shape[1], -1),
+                    fvu=flat_f.fvu,
+                    auxk_loss=flat_f.auxk_loss,
+                    multi_topk_fvu=flat_f.multi_topk_fvu
+                )
+                dense = to_dense(f.latent_acts, f.latent_indices, num_latents).save()
+                x_hat = dense @ dictionary.W_dec.mT.T
+                x_res = x - x_hat
+
+                hidden_states_patch[submodule] = DenseAct(dense, x_res).save()
+
+            logits = model.output.logits.save()
+            metric_patch = metric_fn(logits, **metric_kwargs).save()
         total_effect = (metric_patch.value - metric_clean.value).detach()
         hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
 
     effects = {}
     deltas = {}
     grads = {}
-    for submodule in submodules:
+    for i, submodule in enumerate(submodules):
         dictionary = dictionaries[submodule]
         clean_state = hidden_states_clean[submodule]
         patch_state = hidden_states_patch[submodule]
-        with model.trace(**tracer_kwargs) as tracer:
-            metrics = []
+        with model.trace() as tracer:
             fs = []
             for step in range(steps):
                 alpha = step / steps
@@ -155,21 +204,25 @@ def _pe_ig(
                 f.act.retain_grad()
                 f.res.retain_grad()
                 fs.append(f)
-                with tracer.invoke(clean, scan=tracer_kwargs['scan']):
+
+                with tracer.invoke(clean):
                     if is_tuple[submodule]:
-                        submodule.output[0][:] = dictionary.decode(f.act) + f.res
+                        submodule.output[0][:] = (f.act @ dictionary.W_dec.mT.T) + f.res
                     else:
-                        submodule.output = dictionary.decode(f.act) + f.res
-                    metrics.append(metric_fn(model, **metric_kwargs))
-            metric = sum([m for m in metrics])
+                        submodule.output = (f.act @ dictionary.W_dec.mT.T) + f.res
+
+            logits = model.output.logits.save()
+
+            # Create gradients for the act and residual
+            metric = metric_fn(logits, **metric_kwargs, repeat=10)
             metric.sum().backward(retain_graph=True) # TODO : why is this necessary? Probably shouldn't be, contact jaden
 
         mean_grad = sum([f.act.grad for f in fs]) / steps
         mean_residual_grad = sum([f.res.grad for f in fs]) / steps
-        grad = SparseAct(act=mean_grad, res=mean_residual_grad)
+        grad = DenseAct(act=mean_grad, res=mean_residual_grad)
         delta = (patch_state - clean_state).detach() if patch_state is not None else -clean_state.detach()
         effect = grad @ delta
-
+        
         effects[submodule] = effect
         deltas[submodule] = delta
         grads[submodule] = grad
@@ -185,10 +238,10 @@ def _pe_exact(
     dictionaries,
     metric_fn,
     ):
-
+    num_latents = next(iter(dictionaries.values())).num_latents
     # first run through a test input to figure out which hidden states are tuples
     is_tuple = {}
-    with model.trace("_"):
+    with model.scan("_"):
         for submodule in submodules:
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
@@ -199,16 +252,17 @@ def _pe_exact(
             x = submodule.output
             if is_tuple[submodule]:
                 x = x[0]
-            f = dictionary.encode(x)
-            x_hat = dictionary.decode(f)
+            f = nnsight.apply(dictionary.encode, x)
+            x_hat = nnsight.apply(dictionary.decode, f.top_acts, f.top_indices)
             residual = x - x_hat
-            hidden_states_clean[submodule] = SparseAct(act=f, res=residual).save()
-        metric_clean = metric_fn(model).save()
+            dense = to_dense(f.top_acts, f.top_indices, num_latents).save()
+            hidden_states_clean[submodule] = DenseAct(act=dense, res=residual.save()).save()
+        metric_clean = metric_fn(model.output).save()
     hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
 
     if patch is None:
         hidden_states_patch = {
-            k : SparseAct(act=t.zeros_like(v.act), res=t.zeros_like(v.res)) for k, v in hidden_states_clean.items()
+            k : DenseAct(act=t.zeros_like(v.act), res=t.zeros_like(v.res)) for k, v in hidden_states_clean.items()
         }
         total_effect = None
     else:
@@ -219,11 +273,12 @@ def _pe_exact(
                 x = submodule.output
                 if is_tuple[submodule]:
                     x = x[0]
-                f = dictionary.encode(x)
-                x_hat = dictionary.decode(f)
+                f = nnsight.apply(dictionary.encode, x)
+                x_hat = nnsight.apply(dictionary.decode, f.top_acts, f.top_indices)
                 residual = x - x_hat
-                hidden_states_patch[submodule] = SparseAct(act=f, res=residual).save()
-            metric_patch = metric_fn(model).save()
+                dense = to_dense(f.top_acts, f.top_indices, num_latents).save()
+                hidden_states_patch[submodule] = DenseAct(act=dense, res=residual).save()
+            metric_patch = metric_fn(model.output).save()
         total_effect = metric_patch.value - metric_clean.value
         hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
 
@@ -233,7 +288,7 @@ def _pe_exact(
         dictionary = dictionaries[submodule]
         clean_state = hidden_states_clean[submodule]
         patch_state = hidden_states_patch[submodule]
-        effect = SparseAct(act=t.zeros_like(clean_state.act), resc=t.zeros(*clean_state.res.shape[:-1])).to(model.device)
+        effect = DenseAct(act=t.zeros_like(clean_state.act), resc=t.zeros(*clean_state.res.shape[:-1])).to(model.device)
         
         # iterate over positions and features for which clean and patch differ
         idxs = t.nonzero(patch_state.act - clean_state.act)
@@ -242,12 +297,13 @@ def _pe_exact(
                 with model.trace(clean, **tracer_kwargs):
                     f = clean_state.act.clone()
                     f[tuple(idx)] = patch_state.act[tuple(idx)]
-                    x_hat = dictionary.decode(f)
+                    x_hat = (f @ dictionary.W_dec.mT.T) + clean_state.res.clone()
+                    # x_hat = nnsight.apply(dictionary.decode, f.top_acts, f.top_indices)
                     if is_tuple[submodule]:
                         submodule.output[0][:] = x_hat + clean_state.res
                     else:
                         submodule.output = x_hat + clean_state.res
-                    metric = metric_fn(model).save()
+                    metric = metric_fn(model.output).save()
                 effect.act[tuple(idx)] = (metric.value - metric_clean.value).sum()
 
         for idx in list(ndindex(effect.resc.shape)):
@@ -260,7 +316,7 @@ def _pe_exact(
                         submodule.output[0][:] = x_hat + res
                     else:
                         submodule.output = x_hat + res
-                    metric = metric_fn(model).save()
+                    metric = metric_fn(model.output).save()
                 effect.resc[tuple(idx)] = (metric.value - metric_clean.value).sum()
         
         effects[submodule] = effect
@@ -292,18 +348,17 @@ def patching_effect(
 def jvp(
         input,
         model,
-        dictionaries,
+        dictionaries: dict[Any, Sae],
         downstream_submod,
         downstream_features,
         upstream_submod,
-        left_vec : Union[SparseAct, Dict[int, SparseAct]],
-        right_vec : SparseAct,
+        left_vec : Union[DenseAct, Dict[int, DenseAct]],
+        right_vec : DenseAct,
         return_without_right = False,
 ):
     """
     Return a sparse shape [# downstream features + 1, # upstream features + 1] tensor of Jacobian-vector products.
     """
-
     if not downstream_features: # handle empty list
         if not return_without_right:
             return t.sparse_coo_tensor(t.zeros((2, 0), dtype=t.long), t.zeros(0)).to(model.device)
@@ -312,7 +367,7 @@ def jvp(
 
     # first run through a test input to figure out which hidden states are tuples
     is_tuple = {}
-    with model.trace("_"):
+    with model.scan("_"):
         is_tuple[upstream_submod] = type(upstream_submod.output.shape) == tuple
         is_tuple[downstream_submod] = type(downstream_submod.output.shape) == tuple
 
@@ -324,14 +379,27 @@ def jvp(
         jv_indices = {}
         jv_values = {}
 
-    with model.trace(input, **tracer_kwargs):
+    with model.trace(input, scan=True) as tracer:
         # first specify forward pass modifications
         x = upstream_submod.output
         if is_tuple[upstream_submod]:
             x = x[0]
-        x_hat, f = upstream_dict(x, output_features=True)
-        x_res = x - x_hat
-        upstream_act = SparseAct(act=f, res=x_res).save()
+
+        flat_f = nnsight.apply(upstream_dict.forward, x.flatten(0, 1))
+        f = ForwardOutput(
+            latent_acts=flat_f.latent_acts.reshape(x.shape[0], x.shape[1], -1),
+            latent_indices=flat_f.latent_indices.reshape(x.shape[0], x.shape[1], -1),
+            sae_out=flat_f.sae_out.reshape(x.shape[0], x.shape[1], -1),
+            fvu=flat_f.fvu,
+            auxk_loss=flat_f.auxk_loss,
+            multi_topk_fvu=flat_f.multi_topk_fvu
+        )
+
+        # x_hat = f.sae_out
+        dense = to_dense(f.latent_acts, f.latent_indices, upstream_dict.num_latents) # grad not present
+        x_hat = dense @ upstream_dict.W_dec.mT.T
+        x_res = x - x_hat # grad present
+        upstream_act = DenseAct(act=dense, res=x_res).save()
         if is_tuple[upstream_submod]:
             upstream_submod.output[0][:] = x_hat + x_res
         else:
@@ -339,17 +407,30 @@ def jvp(
         y = downstream_submod.output
         if is_tuple[downstream_submod]:
             y = y[0]
-        y_hat, g = downstream_dict(y, output_features=True)
+
+        flat_f = nnsight.apply(downstream_dict.forward, y.flatten(0, 1))
+        f = ForwardOutput(
+            latent_acts=flat_f.latent_acts.reshape(x.shape[0], x.shape[1], -1),
+            latent_indices=flat_f.latent_indices.reshape(x.shape[0], x.shape[1], -1),
+            sae_out=flat_f.sae_out.reshape(x.shape[0], x.shape[1], -1),
+            fvu=flat_f.fvu,
+            auxk_loss=flat_f.auxk_loss,
+            multi_topk_fvu=flat_f.multi_topk_fvu
+        )
+        # y_hat = f.sae_out
+        g = to_dense(f.latent_acts, f.latent_indices, downstream_dict.num_latents).save()
+        y_hat = g @ downstream_dict.W_dec.mT.T
         y_res = y - y_hat
-        downstream_act = SparseAct(act=g, res=y_res).save()
+        downstream_act = DenseAct(act=g, res=y_res).save()
 
         for downstream_feat in downstream_features:
-            if isinstance(left_vec, SparseAct):
+            if isinstance(left_vec, DenseAct):
                 to_backprop = (left_vec @ downstream_act).to_tensor().flatten()
             elif isinstance(left_vec, dict):
                 to_backprop = (left_vec[downstream_feat] @ downstream_act).to_tensor().flatten()
             else:
                 raise ValueError(f"Unknown type {type(left_vec)}")
+        
             vjv = (upstream_act.grad @ right_vec).to_tensor().flatten()
             if return_without_right:
                 jv = (upstream_act.grad @ right_vec).to_tensor().flatten()
@@ -357,22 +438,23 @@ def jvp(
             to_backprop[downstream_feat].backward(retain_graph=True)
 
             vjv_indices[downstream_feat] = vjv.nonzero().squeeze(-1).save()
-            vjv_values[downstream_feat] = vjv[vjv_indices[downstream_feat]].save()
+            vjv_values[downstream_feat] = vjv[vjv_indices[downstream_feat].save()].save()
 
             if return_without_right:
                 jv_indices[downstream_feat] = jv.nonzero().squeeze(-1).save()
                 jv_values[downstream_feat] = jv[vjv_indices[downstream_feat]].save()
 
-    # get shapes
+    
     d_downstream_contracted = len((downstream_act.value @ downstream_act.value).to_tensor().flatten())
     d_upstream_contracted = len((upstream_act.value @ upstream_act.value).to_tensor().flatten())
     if return_without_right:
         d_upstream = len(upstream_act.value.to_tensor().flatten())
-
-
+    
     vjv_indices = t.tensor(
-        [[downstream_feat for downstream_feat in downstream_features for _ in vjv_indices[downstream_feat].value],
-         t.cat([vjv_indices[downstream_feat].value for downstream_feat in downstream_features], dim=0)]
+        [
+            [downstream_feat for downstream_feat in downstream_features for _ in vjv_indices[downstream_feat].value],
+            t.cat([vjv_indices[downstream_feat].value for downstream_feat in downstream_features], dim=0)
+        ]
     ).to(model.device)
     vjv_values = t.cat([vjv_values[downstream_feat].value for downstream_feat in downstream_features], dim=0)
 

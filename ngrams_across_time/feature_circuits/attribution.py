@@ -46,7 +46,7 @@ def _pe_attrib(
             x_hat, f = dictionary(x, output_features=True).sae_out # x_hat implicitly depends on f
             residual = x - x_hat
 
-            hidden_states_clean[submodule] = DenseAct(act=to_dense(f.top_acts, f.top_indices, num_latents).save(), res=residual).save()
+            hidden_states_clean[submodule] = DenseAct(act=to_dense(f.top_acts, f.top_indices, num_latents), res=residual).save()
             grads[submodule] = hidden_states_clean[submodule].grad.save()
             residual.grad = t.zeros_like(residual)
             x_recon = x_hat + residual
@@ -75,7 +75,7 @@ def _pe_attrib(
                     x = x[0]
                 x_hat, f = dictionary(x, output_features=True).sae_out
                 residual = x - x_hat
-                dense = to_dense(f.top_acts, f.top_indices, num_latents).save()
+                dense = to_dense(f.top_acts, f.top_indices, num_latents)
                 hidden_states_patch[submodule] = DenseAct(act=dense, res=residual).save()
             metric_patch = metric_fn(model.output, **metric_kwargs).save()
         total_effect = (metric_patch.value - metric_clean.value).detach()
@@ -106,7 +106,6 @@ def _pe_ig(
         metric_kwargs=dict(),
 ):
     num_latents = next(iter(dictionaries.values())).num_latents
-    data = []
     # first run through the fake inputs to figure out which hidden states are tuples
     is_tuple = {}
     with model.scan("_"):
@@ -121,9 +120,7 @@ def _pe_ig(
             dictionary = dictionaries[submodule]
             x = submodule.output
             if is_tuple[submodule]:
-                x = x[0].save()
-            if i == 1:
-                data.append(x.save())
+                x = x[0]
             
             flat_f = nnsight.apply(dictionary.forward, x.flatten(0, 1))
             f = ForwardOutput(
@@ -135,16 +132,13 @@ def _pe_ig(
                 multi_topk_fvu=flat_f.multi_topk_fvu
             )
 
-            dense = to_dense(f.latent_acts, f.latent_indices, num_latents).save()
+            dense = to_dense(f.latent_acts, f.latent_indices, num_latents)
             x_hat = dense @ dictionary.W_dec.mT.T
             x_res = x - x_hat
-            if i == 1:
-                f_latent_acts_sum_clean = f.latent_acts.sum().save()
 
             hidden_states_clean[submodule] = DenseAct(dense, x_res).save()
         
-        logits = model.output.logits.save()
-        metric_clean = metric_fn(logits, **metric_kwargs).save()
+        metric_clean = metric_fn(model.output.logits, **metric_kwargs).save()
 
     hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
 
@@ -159,14 +153,11 @@ def _pe_ig(
     else:
         hidden_states_patch = {}
         with model.trace(patch, scan=True), t.no_grad():
-            for i, submodule in enumerate(submodules):
+            for submodule in submodules:
                 dictionary = dictionaries[submodule]
                 x = submodule.output
                 if is_tuple[submodule]:
-                    # MLP activations are the same at every position
                     x = x[0]
-                if i == 1:
-                    data.append(x.save())
 
                 flat_f = nnsight.apply(dictionary.forward, x.flatten(0, 1))
                 f = ForwardOutput(
@@ -177,14 +168,13 @@ def _pe_ig(
                     auxk_loss=flat_f.auxk_loss,
                     multi_topk_fvu=flat_f.multi_topk_fvu
                 )
-                dense = to_dense(f.latent_acts, f.latent_indices, num_latents).save()
+                dense = to_dense(f.latent_acts, f.latent_indices, num_latents)
                 x_hat = dense @ dictionary.W_dec.mT.T
                 x_res = x - x_hat
 
                 hidden_states_patch[submodule] = DenseAct(dense, x_res).save()
 
-            logits = model.output.logits.save()
-            metric_patch = metric_fn(logits, **metric_kwargs).save()
+            metric_patch = metric_fn(model.output.logits, **metric_kwargs).save()
         total_effect = (metric_patch.value - metric_clean.value).detach()
         hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
 
@@ -210,11 +200,9 @@ def _pe_ig(
                     else:
                         submodule.output = (f.act @ dictionary.W_dec.mT.T) + f.res
 
-            logits = model.output.logits.save()
-
             # Create gradients for the act and residual
-            metric = metric_fn(logits, **metric_kwargs, repeat=10)
-            metric.sum().backward(retain_graph=True) # TODO : why is this necessary? Probably shouldn't be, contact jaden
+            metric = metric_fn(model.output.logits, **metric_kwargs, repeat=10)
+            metric.sum().backward(retain_graph=True)
 
         mean_grad = sum([f.act.grad for f in fs]) / steps
         mean_residual_grad = sum([f.res.grad for f in fs]) / steps
@@ -254,9 +242,9 @@ def _pe_exact(
             f = nnsight.apply(dictionary.encode, x)
             x_hat = nnsight.apply(dictionary.decode, f.top_acts, f.top_indices)
             residual = x - x_hat
-            dense = to_dense(f.top_acts, f.top_indices, num_latents).save()
-            hidden_states_clean[submodule] = DenseAct(act=dense, res=residual.save()).save()
-        metric_clean = metric_fn(model.output).save()
+            dense = to_dense(f.top_acts, f.top_indices, num_latents)
+            hidden_states_clean[submodule] = DenseAct(act=dense, res=residual).save()
+        metric_clean = metric_fn(model.output.logits).save()
     hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
 
     if patch is None:
@@ -275,9 +263,9 @@ def _pe_exact(
                 f = nnsight.apply(dictionary.encode, x)
                 x_hat = nnsight.apply(dictionary.decode, f.top_acts, f.top_indices)
                 residual = x - x_hat
-                dense = to_dense(f.top_acts, f.top_indices, num_latents).save()
+                dense = to_dense(f.top_acts, f.top_indices, num_latents)
                 hidden_states_patch[submodule] = DenseAct(act=dense, res=residual).save()
-            metric_patch = metric_fn(model.output).save()
+            metric_patch = metric_fn(model.output.logits).save()
         total_effect = metric_patch.value - metric_clean.value
         hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
 
@@ -302,7 +290,7 @@ def _pe_exact(
                         submodule.output[0][:] = x_hat + clean_state.res
                     else:
                         submodule.output = x_hat + clean_state.res
-                    metric = metric_fn(model.output).save()
+                    metric = metric_fn(model.output.logits).save()
                 effect.act[tuple(idx)] = (metric.value - metric_clean.value).sum()
 
         for idx in list(ndindex(effect.resc.shape)):
@@ -315,7 +303,7 @@ def _pe_exact(
                         submodule.output[0][:] = x_hat + res
                     else:
                         submodule.output = x_hat + res
-                    metric = metric_fn(model.output).save()
+                    metric = metric_fn(model.output.logits).save()
                 effect.resc[tuple(idx)] = (metric.value - metric_clean.value).sum()
         
         effects[submodule] = effect
@@ -394,8 +382,7 @@ def jvp(
             multi_topk_fvu=flat_f.multi_topk_fvu
         )
 
-        # x_hat = f.sae_out
-        dense = to_dense(f.latent_acts, f.latent_indices, upstream_dict.num_latents) # grad not present
+        dense = to_dense(f.latent_acts, f.latent_indices, upstream_dict.num_latents)
         x_hat = dense @ upstream_dict.W_dec.mT.T
         x_res = x - x_hat # grad present
         upstream_act = DenseAct(act=dense, res=x_res).save()

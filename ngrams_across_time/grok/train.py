@@ -1,6 +1,7 @@
 import os
 import copy
 from pathlib import Path
+from argparse import ArgumentParser
 
 import pandas as pd
 import torch
@@ -24,9 +25,9 @@ TRAIN_MODEL = True
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
-def main():
+def main(MODEL_SEED = 999):
     # Define the location to save the model, using a relative path
-    PTH_LOCATION = "workspace/grok.pth"
+    PTH_LOCATION = f"workspace/grok/{MODEL_SEED}.pth"
     os.makedirs(Path(PTH_LOCATION).parent, exist_ok=True)
 
     """# Model Training
@@ -82,9 +83,9 @@ def main():
     # 3 yields fast drop around 5k
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    torch.manual_seed(999)
-    import random; random.seed(999)
-    np.random.seed(999)
+    torch.manual_seed(MODEL_SEED)
+    import random; random.seed(MODEL_SEED)
+    np.random.seed(MODEL_SEED)
     config = TransformerConfig(
         d_vocab=p + 1,
         d_model=128,
@@ -161,7 +162,7 @@ def main():
 
         torch.save(
             {
-                "model":model.state_dict(),
+                "model": model.state_dict(),
                 "dataset": dataset,
                 "labels": labels,
                 "config": config,
@@ -223,8 +224,13 @@ def main():
         return figure
 
     fig = add_lines(fig)
-    fig.write_image("loss_curves.pdf", format="pdf")
+    fig.write_image(f"loss_curves-{MODEL_SEED}.pdf", format="pdf")
 
+def parse_args():
+    parser = ArgumentParser(description="Train the model")
+    parser.add_argument("--model_seed", type=int, default=999, help="Seed for the model")
+    return parser.parse_args()
 
 if __name__ == '__main__':
-    main()
+    args = parse_args()
+    main(args.model_seed)

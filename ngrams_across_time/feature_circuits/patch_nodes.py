@@ -10,8 +10,6 @@ from ngrams_across_time.feature_circuits.dense_act import DenseAct
 from ngrams_across_time.feature_circuits.dense_act import DenseAct, to_dense
 
 
-EffectOut = namedtuple('EffectOut', ['effects', 'deltas', 'grads', 'total_effect'])
-
 # Looking for the number of nodes ablated to reach a certain loss increase
 def patch_nodes(
         clean,
@@ -38,7 +36,7 @@ def patch_nodes(
             dictionary = dictionaries[submodule]
             x = submodule.output
             if is_tuple[submodule]:
-                x = x[0].save()
+                x = x[0]
             
             flat_f = nnsight.apply(dictionary.forward, x.flatten(0, 1))
             f = ForwardOutput(
@@ -50,13 +48,12 @@ def patch_nodes(
                 multi_topk_fvu=flat_f.multi_topk_fvu
             )
 
-            dense = to_dense(f.latent_acts, f.latent_indices, num_latents).save()
+            dense = to_dense(f.latent_acts, f.latent_indices, num_latents)
             x_hat = dense @ dictionary.W_dec.mT.T
             x_res = x - x_hat
             hidden_states_clean[submodule] = DenseAct(dense, x_res).save()
         
-        logits = model.output.logits.save()
-        metric_clean = metric_fn(logits, **metric_kwargs).save()
+        metric_clean = metric_fn(model.output.logits, **metric_kwargs).save()
 
     hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
 
@@ -87,14 +84,13 @@ def patch_nodes(
                     auxk_loss=flat_f.auxk_loss,
                     multi_topk_fvu=flat_f.multi_topk_fvu
                 )
-                dense = to_dense(f.latent_acts, f.latent_indices, num_latents).save()
+                dense = to_dense(f.latent_acts, f.latent_indices, num_latents)
                 x_hat = dense @ dictionary.W_dec.mT.T
                 x_res = x - x_hat
 
                 hidden_states_patch[submodule] = DenseAct(dense, x_res).save()
 
-            logits = model.output.logits.save()
-            metric_patch = metric_fn(logits, **metric_kwargs).save()
+            metric_patch = metric_fn(model.output.logits, **metric_kwargs).save()
         hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
 
     with model.trace(clean, scan=True) as tracer:
@@ -111,18 +107,16 @@ def patch_nodes(
                 if -1 in feature_indices:
                     alpha_res[:] = 1.
 
-            alpha = DenseAct(alpha_act, alpha_res).save()
-            alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, torch.ones_like(alpha_res) - alpha_res).save()
+            alpha = DenseAct(alpha_act, alpha_res)
+            alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, torch.ones_like(alpha_res) - alpha_res)
 
-            masked_acts = (alpha_complement * clean_state + alpha * patch_state).save()
+            masked_acts = (alpha_complement * clean_state + alpha * patch_state)
 
-            # add the original residual?
             if is_tuple[submodule]:
                 submodule.output[0][:] = (masked_acts.act @ dictionary.W_dec.mT.T) + masked_acts.res
             else:
                 submodule.output = (masked_acts.act @ dictionary.W_dec.mT.T) + masked_acts.res
 
-        logits = model.output.logits.save()
-        metric_patched = metric_fn(logits, **metric_kwargs).save()
+        metric_patched = metric_fn(model.output.logits, **metric_kwargs).save()
 
     return metric_patched, metric_patch, metric_clean

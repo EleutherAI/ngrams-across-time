@@ -92,6 +92,7 @@ def get_args():
     parser = ArgumentParser()
     parser.add_argument("--patch", action="store_true")
     parser.add_argument("--loss", action="store_true")
+    parser.add_argument("--residual", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--model_seed", type=int, default=999, help="Model seed to load checkpoints for")
     return parser.parse_args()
@@ -111,6 +112,10 @@ def main():
     # Get minimal set of checkpoints for model seed 1
     # model_checkpoints = model_checkpoints[0, 2, 12, 17, 45]
     # checkpoint_epochs = checkpoint_epochs[0, 2, 12, 17, 45]
+    
+    config = cached_data['config']
+    config = assert_type(TransformerConfig, config)
+    p = config.d_vocab - 1
 
     dataset = cached_data['dataset']
     labels = cached_data['labels']
@@ -131,17 +136,21 @@ def main():
     })
     sae_train_dataset.set_format(type="torch", columns=["input_ids", "labels"])
     
-    p = 113
-    model = CustomTransformer(TransformerConfig(
-        d_vocab=p + 1,
-        d_model=128,
-        n_ctx=5, # dummy inputs hardcoded in huggingface transformers expect > 4
-        num_layers=1,
-        num_heads=4,
-        d_mlp=512,
-        act_type="ReLU",
-        use_ln=False,
-    ))
+    # Create smaller patching dataset
+    len_data = 4 if args.debug else 40
+    train_data = train_data[:len_data]
+    train_data = train_data.cuda()
+    train_labels = train_labels[:len_data]
+    patch_train_data, patch_train_labels = create_patch_train_data(train_data, p)
+    patch_train_data = patch_train_data.cuda()
+
+    def metric_fn(logits, repeat: int = 1):
+        labels = train_labels.repeat(repeat)
+        return (
+            F.cross_entropy(logits.to(torch.float64)[:, -1, :], labels, reduction="none")
+        )
+    
+    model = CustomTransformer(config)
 
     data_path = Path(f"workspace/eap_data/{args.model_seed}.pth")
     data_path.parent.mkdir(exist_ok=True, parents=True)
@@ -207,25 +216,12 @@ def main():
                     device=device
                 )
 
-            # Run EAP with SAEs
-            # Count the loss increase when ablating an arbitrary number of edges (10):
-            node_threshold = 0.01
-            len_data = 4 if args.debug else 40
-            train_data = train_data[:len_data]
-            train_data = train_data.cuda()
-            train_labels = train_labels[:len_data]
-            patch_train_data, patch_train_labels = create_patch_train_data(train_data, p)
-            patch_train_data = patch_train_data.cuda()
-
-            def metric_fn(logits, repeat: int = 1):
-                labels = train_labels
-                if repeat > 1:
-                    labels = labels.repeat(repeat)
-                return (
-                    F.cross_entropy(logits.to(torch.float64)[:, -1, :], labels, reduction="none")
-                )
+            if args.residual:
+                continue
             
             if args.patch:
+                # Track the loss increase when ablating a constant number of nodes
+                node_threshold = 0.01
                 model.remove_all_hooks()
                 nodes, edges = get_circuit(train_data, patch_train_data, 
                                         language_model, embed, attns, mlps, 

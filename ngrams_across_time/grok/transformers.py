@@ -111,10 +111,13 @@ class LayerNorm(nn.Module):
 class Attention(nn.Module):
     def __init__(self, d_model, num_heads, d_head, n_ctx):
         super().__init__()
+        # 0.64/d_model
         self.W_K = nn.Parameter(t.randn(num_heads, d_head, d_model)/np.sqrt(d_model))
         self.W_Q = nn.Parameter(t.randn(num_heads, d_head, d_model)/np.sqrt(d_model))
         self.W_V = nn.Parameter(t.randn(num_heads, d_head, d_model)/np.sqrt(d_model))
         self.W_O = nn.Parameter(t.randn(d_model, d_head * num_heads)/np.sqrt(d_model))
+        self.register_buffer('mask', t.tril(t.ones((n_ctx, n_ctx))))
+
         self.d_head = d_head
         self.num_heads = num_heads
         self.hook_k = HookPoint()
@@ -124,39 +127,22 @@ class Attention(nn.Module):
         self.hook_attn = HookPoint()
         self.hook_attn_pre = HookPoint()
 
-        # Create causal mask
-        self.register_buffer("mask", t.tril(t.ones(n_ctx, n_ctx)).view(n_ctx, n_ctx))
-
     def apply_causal_mask(self, attn_scores):
-        # attn_scores: [batch, n_heads, query_pos, key_pos]
         mask = t.triu(t.ones(attn_scores.size(-2), attn_scores.size(-1), device=attn_scores.device), diagonal=1).bool()
         attn_scores.masked_fill_(mask, -1e5)
         return attn_scores
     
-    def forward(self, x, attention_mask=None):
-        # b, s, d = x.shape  # batch, sequence length, d_model
-        
-        k = self.hook_k(einops.einsum(self.W_K, x, 'n_head d_head d_model, batch key_pos d_model -> batch key_pos n_head d_head'))
-        q = self.hook_q(einops.einsum(self.W_Q, x, 'n_head d_head d_model, batch query_pos d_model -> batch query_pos n_head d_head'))
-        attn_scores = einops.einsum(q, k, "batch query_pos n_head d_head, batch key_pos n_head d_head -> batch n_head query_pos key_pos") / np.sqrt(self.d_head)
-        attn_scores = self.apply_causal_mask(attn_scores)
-        # if attention_mask is not None:
-        #     breakpoint()
-        #     print(attention_mask)
-        #     attention_mask = attention_mask.view(b, 1, 1, s)  # [B, 1, 1, S]
-        #     attn_scores = attn_scores + attention_mask
-    
-        attn_scores = self.hook_attn_pre(attn_scores)
-        attn_probs = self.hook_attn(F.softmax(attn_scores, dim=-1))
-        
-        v = self.hook_q(einops.einsum(self.W_V, x, 'n_head d_head d_model, batch key_pos d_model -> batch key_pos n_head d_head'))
-        z = self.hook_z(einops.einsum(v, attn_probs, "batch key_pos n_head d_head, batch n_head query_pos key_pos -> batch query_pos n_head d_head"))
-        # z = z.transpose(1, 2).contiguous().view(b, s, -1)
-        # output = t.einsum('df,bsf->bsd', self.W_O, z)
-        z = einops.rearrange(z, 'batch query_pos n_heads d_head -> batch query_pos (n_heads d_head)')
-        output = einops.einsum(z, self.W_O, "batch query_pos d_model, d_model d_model -> batch query_pos d_model")
-
-        return output
+    def forward(self, x):    
+        k = self.hook_k(t.einsum('ihd,bpd->biph', self.W_K, x))
+        q = self.hook_q(t.einsum('ihd,bpd->biph', self.W_Q, x))
+        v = self.hook_v(t.einsum('ihd,bpd->biph', self.W_V, x))
+        attn_scores_pre = t.einsum('biph,biqh->biqp', k, q)
+        attn_scores_masked = t.tril(attn_scores_pre) - 1e10 * (1 - self.mask[:x.shape[-2], :x.shape[-2]])
+        attn_matrix = self.hook_attn(F.softmax(self.hook_attn_pre(attn_scores_masked / np.sqrt(self.d_head)), dim=-1))
+        z = self.hook_z(t.einsum('biph,biqp->biqh', v, attn_matrix))
+        z_flat = einops.rearrange(z, 'b i q h -> b q (i h)')
+        out = t.einsum('df,bqf->bqd', self.W_O, z_flat)
+        return out
 
 
 class MLP(nn.Module):
@@ -194,8 +180,8 @@ class TransformerBlock(nn.Module):
         self.hook_resid_mid = HookPoint()
         self.hook_resid_post = HookPoint()
     
-    def forward(self, x, mask=None):
-        x = self.hook_resid_mid(x + self.hook_attn_out(self.attn(self.ln1(self.hook_resid_pre(x)), mask)))
+    def forward(self, x):
+        x = self.hook_resid_mid(x + self.hook_attn_out(self.attn(self.ln1(self.hook_resid_pre(x)))))
         x = self.hook_resid_post(x + self.hook_mlp_out(self.mlp(self.ln2(x))))
         return x
 
@@ -222,13 +208,13 @@ class CustomTransformer(PreTrainedModel):
         self.unembed = Unembed(d_vocab=config.d_vocab, d_model=config.d_model)
         
         # Initialize weights and apply final processing
-        self.post_init()
+        # self.post_init()
         
         # Name all hook points
         for name, module in self.named_modules():
             if isinstance(module, HookPoint):
                 module.give_name(name)
-    
+
     def get_input_embeddings(self):
         return self.embed
     
@@ -240,7 +226,7 @@ class CustomTransformer(PreTrainedModel):
         x = self.pos_embed(x)
 
         for block in self.blocks:
-            x = block(x, attention_mask)
+            x = block(x)
         
         logits = self.unembed(x)
         

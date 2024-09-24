@@ -67,6 +67,7 @@ def patch_nodes(
                 res=t.zeros_like(v.res)
             ) for k, v in hidden_states_clean.items()
         }
+        metric_patch = None
     else:
         hidden_states_patch = {}
         with model.trace(patch, scan=True), t.no_grad():

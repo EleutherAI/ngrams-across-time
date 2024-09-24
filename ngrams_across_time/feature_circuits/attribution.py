@@ -116,7 +116,6 @@ def _pe_ig(
     hidden_states_clean = {}
     # scan=True must be set; otherwise faketensor shapes aren't populated and 
     # the reshape code will produce incorrect results (FAIL SILENTLY)
-    print(clean.shape)
     with model.trace(clean, scan=True) as tracer, t.no_grad():
         for i, submodule in enumerate(submodules):
             dictionary = dictionaries[submodule]

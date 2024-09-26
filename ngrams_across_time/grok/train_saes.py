@@ -1,44 +1,51 @@
 import os
-from typing import Any
+from argparse import ArgumentParser
+from pathlib import Path
 
-import torch.nn.functional as F
 import torch
-import einops
 from tqdm import tqdm
 from ngrams_across_time.grok.transformers import CustomTransformer, TransformerConfig
+from ngrams_across_time.utils.utils import assert_type
 
-from sae import SaeConfig, SaeTrainer, TrainConfig, Sae
+from sae import SaeConfig, SaeTrainer, TrainConfig
 from datasets import Dataset as HfDataset
 import lovely_tensors as lt
 lt.monkey_patch()
 
 device = torch.device("cuda")
 
+def get_args():
+    parser = ArgumentParser()
+    parser.add_argument("--model_seed", type=int, default=1, help="Model seed to load checkpoints for")
+    parser.add_argument("--run_name", type=str, default='')
+    return parser.parse_args()
+
 def main():
+    args = get_args()
     DATA_SEED = 598
     torch.manual_seed(DATA_SEED)
 
-    # Generate dataset
-    p = 113
-    frac_train = 0.3
-    a_vector = einops.repeat(torch.arange(p), "i -> (i j)", j=p)
-    b_vector = einops.repeat(torch.arange(p), "j -> (i j)", i=p)
-    equals_vector = einops.repeat(torch.tensor(113), " -> (i j)", i=p, j=p)
-    dataset = torch.stack([a_vector, b_vector, equals_vector], dim=1).to(device)
-    labels = (dataset[:, 0] + dataset[:, 1]) % p
+    run_identifier = f"{args.model_seed}{'-' + args.run_name if args.run_name else ''}"
 
-    indices = torch.randperm(p*p)
-    cutoff = int(p*p*frac_train)
-    train_indices = indices[:cutoff]
-    test_indices = indices[cutoff:]
+    # Use existing on-disk model checkpoints
+    MODEL_PATH = Path(f"workspace/grok/{run_identifier}.pth")
+    cached_data = torch.load(MODEL_PATH)
+
+    config = cached_data['config']
+    config = assert_type(TransformerConfig, config)
+
+    dataset = cached_data['dataset']
+    labels = cached_data['labels']
+    train_indices = cached_data['train_indices']
+    test_indices = cached_data['test_indices']
 
     train_data = dataset[train_indices]
     train_labels = labels[train_indices]
 
     test_data = dataset[test_indices]
     test_labels = labels[test_indices]
-    
-    # the SAEs like epochs
+
+    # SAEs like multiple epochs
     num_epochs = 32
     sae_train_dataset = HfDataset.from_dict({
         "input_ids": train_data.repeat(num_epochs, 1),
@@ -47,39 +54,28 @@ def main():
     sae_train_dataset.set_format(type="torch", columns=["input_ids", "labels"])
 
     # Define model with existing on-disk checkpoints
-    PTH_LOCATION = "workspace/grokking_demo.pth"
-    cached_data = torch.load(PTH_LOCATION)
     model_checkpoints = cached_data["checkpoints"]
     checkpoint_epochs = cached_data["checkpoint_epochs"]
 
-    model = CustomTransformer(TransformerConfig(
-        vocab_size=p + 1,
-        hidden_size=128,
-        n_ctx=5,
-        num_layers=1,
-        num_heads=4,
-        intermediate_size=512,
-        act_type = "ReLU",
-        use_ln = False
-    ))
+    model = CustomTransformer(config)
 
     for epoch, state_dict in tqdm(list(zip(checkpoint_epochs, model_checkpoints))[::10]):
         model.load_state_dict(state_dict)
         model.cuda() # type: ignore
 
         # Train SAE on checkpoints
-        run_name = f"sae/grok.{epoch}"
+        run_name = f"sae/{run_identifier}/grok.{epoch}"
         if not os.path.exists(run_name):
             cfg = TrainConfig(
                 SaeConfig(multi_topk=True), 
                 batch_size=16,
                 run_name=run_name,
-                log_to_wandb=False,
+                log_to_wandb=True,
                 hookpoints=[
-                    "blocks.0", 
-                    "blocks.*.hook_attn_out", 
-                    "blocks.*.hook_mlp_out",
-                    "blocks.*.hook_resid_post"
+                    "blocks.*.hook_resid_pre", # start of block
+                    "blocks.*.hook_resid_mid", # after ln / attention
+                    "blocks.*.hook_resid_post", # after ln / mlp
+                    "blocks.*.hook_mlp_out"
                 ],
             )
             trainer = SaeTrainer(cfg, sae_train_dataset, model)

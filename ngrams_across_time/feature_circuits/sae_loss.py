@@ -22,7 +22,9 @@ def sae_loss(
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
     # scan=True must be set; otherwise faketensor shapes aren't populated and 
-    # the reshape code will produce incorrect results (FAIL SILENTLY)
+    # the reshape will produce incorrect results (FAIL SILENTLY)
+    
+    # Get loss with all SAEs and no residuals
     with model.trace(clean, scan=True), t.no_grad():
         for submodule in submodules:
             dictionary = dictionaries[submodule]
@@ -44,6 +46,7 @@ def sae_loss(
 
         metric = metric_fn(model.output.logits, **metric_kwargs).save()
 
+    # Get residual norm of each SAE output without interactions from other SAEs
     res = []
     with model.trace(clean, scan=True), t.no_grad():
         for submodule in submodules:

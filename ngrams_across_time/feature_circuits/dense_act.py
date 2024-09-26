@@ -249,7 +249,8 @@ class DenseAct():
     def abs(self):
         return self._map(lambda x, _: x.abs())
 
-
+    
 def to_dense(top_acts, top_indices, num_latents: int):
+    # TODO: in-place scatter seemed to break nnsight, check if this is a problem
     dense_empty = t.zeros(top_acts.shape[0], top_acts.shape[1], num_latents, device=top_acts.device, requires_grad=True)
     return dense_empty.scatter(-1, top_indices.long(), top_acts)

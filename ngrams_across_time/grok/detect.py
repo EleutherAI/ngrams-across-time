@@ -104,21 +104,19 @@ def get_args():
 
 def main():
     args = get_args()
+    run_identifier = f"{args.model_seed}{'-' + args.run_name if args.run_name else ''}"
 
     # Use existing on-disk model checkpoints
-    run_identifier = f"{args.model_seed}{'-' + args.run_name if args.run_name else ''}"
-    PTH_LOCATION = Path(f"workspace/grok/{run_identifier}.pth")
+    MODEL_PATH = Path(f"workspace/grok/{run_identifier}.pth")
+    cached_data = torch.load(MODEL_PATH)
+    
+    OUT_PATH = Path(f"workspace/eap_data/{run_identifier}.pth")
+    OUT_PATH.parent.mkdir(exist_ok=True, parents=True)
 
-    data_path = Path(f"workspace/eap_data/{run_identifier}.pth")
-    data_path.parent.mkdir(exist_ok=True, parents=True)
-
-    checkpoint_eap_data = torch.load(data_path) if data_path.exists() else {}
-
-    cached_data = torch.load(PTH_LOCATION)
     model_checkpoints = cached_data["checkpoints"][::5]
     checkpoint_epochs = cached_data["checkpoint_epochs"][::5]
 
-    # Get minimal set of checkpoints for model seed 1
+    # Minimal set of checkpoints for model seed 1 to show non-monoticity
     # model_checkpoints 0, 2, 12, 17, 45
     # checkpoint_epochs 0, 2, 12, 17, 45
     
@@ -166,6 +164,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
+    checkpoint_eap_data = torch.load(OUT_PATH) if OUT_PATH.exists() else {}
     if args.patch or args.loss or args.residual:
         for epoch, state_dict in tqdm(list(zip(checkpoint_epochs, model_checkpoints))):
             model.remove_all_hooks()
@@ -179,13 +178,13 @@ def main():
 
             language_model = LanguageModel(model, tokenizer=tokenizer)
 
-            sae_path = Path(f"sae/grok.{epoch}")
+            sae_path = Path(f"sae/{run_identifier}/grok.{epoch}")
             if not sae_path.exists():
                 cfg = TrainConfig(
                     SaeConfig(multi_topk=True), 
                     batch_size=16,
                     run_name=str(sae_path),
-                    log_to_wandb=False,
+                    log_to_wandb=True,
                     hookpoints=[
                         "blocks.*.hook_resid_pre", # start of block
                         "blocks.*.hook_resid_mid", # after ln / attention
@@ -243,7 +242,7 @@ def main():
 
                 # Get SAE entropy
                 model.remove_all_hooks()
-                nodes, edges = get_circuit(train_data, patch_train_data, 
+                nodes, edges = get_circuit(train_data, None, 
                                         language_model, embed, attns, mlps, 
                                         resids, dictionaries, metric_fn, aggregation="sum",
                                         nodes_only=True, node_threshold=0.01)
@@ -298,9 +297,9 @@ def main():
                 {loss.mean().item()}, clean loss: {clean_loss.mean().item()}, patch loss: {patch_loss.mean().item() if patch_loss is not None else 0}') 
                 
                 checkpoint_eap_data[epoch]['min_nodes_to_ablate'] = mid
-        torch.save(checkpoint_eap_data, data_path)
+        torch.save(checkpoint_eap_data, OUT_PATH)
         
-    checkpoint_eap_data = torch.load(data_path)
+    checkpoint_eap_data = torch.load(OUT_PATH)
 
     combined_scores: list[list[float]] = [all_node_scores(scores['nodes']) for scores in checkpoint_eap_data.values()]
     combined_residual_scores: list[list[float]] = [all_node_scores(scores['residual_nodes']) for scores in checkpoint_eap_data.values()]

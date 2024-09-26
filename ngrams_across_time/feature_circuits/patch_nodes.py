@@ -10,7 +10,7 @@ from ngrams_across_time.feature_circuits.dense_act import DenseAct
 from ngrams_across_time.feature_circuits.dense_act import DenseAct, to_dense
 
 
-# Looking for the number of nodes ablated to reach a certain loss increase
+# Patch the specified nodes of the model SAEs and get metric values
 def patch_nodes(
         clean,
         patch,

@@ -154,7 +154,7 @@ def _pe_ig(
                 res=t.zeros_like(v.res)
             ) for k, v in hidden_states_clean.items()
         }
-        total_effect = None
+        total_effect = t.tensor(-1.)
     else:
         hidden_states_patch = {}
         with model.trace(patch, scan=True), t.no_grad():

@@ -25,13 +25,14 @@ def sae_loss(
     # the reshape will produce incorrect results (FAIL SILENTLY)
     
     # Get loss with all SAEs and no residuals
+    mses = []
     with model.trace(clean, scan=True), t.no_grad():
         for submodule in submodules:
-            dictionary = dictionaries[submodule]
             x = submodule.output
             if is_tuple[submodule]:
                 x = x[0]
-            
+
+            dictionary = dictionaries[submodule]
             flat_f = nnsight.apply(dictionary.forward, x.flatten(0, 1))
             f = ForwardOutput(
                 latent_acts=flat_f.latent_acts.reshape(x.shape[0], x.shape[1], -1),
@@ -43,6 +44,9 @@ def sae_loss(
             )
             dense = to_dense(f.latent_acts, f.latent_indices, num_latents)
             submodule.output = dense @ dictionary.W_dec.mT.T
+            
+            x_res = x - submodule.output
+            mses.append(t.mean(x_res**2).save())
 
         metric = metric_fn(model.output.logits, **metric_kwargs).save()
 
@@ -68,10 +72,11 @@ def sae_loss(
             dense = to_dense(f.latent_acts, f.latent_indices, num_latents)
             x_hat = dense @ dictionary.W_dec.mT.T
             x_res = x - x_hat
+
             res.append(x_res.norm().save())
 
     # average loss without residuals and with all dictionaries
     # average residual size
-    return metric, t.stack(res).mean().item()
+    return metric, t.stack(res).mean().item(), t.stack(mses).mean().item()
 
 

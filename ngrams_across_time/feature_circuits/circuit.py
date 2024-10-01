@@ -81,6 +81,7 @@ def get_residual_node_scores(
         metric_fn,
         metric_kwargs=dict(),
         aggregation='sum', # or 'none' for not aggregating across sequence position
+        method='ig' # get better approximations for early layers by using ig
 ):
     all_submods = [embed] + [submod for layer_submods in zip(mlps, attns, resids) for submod in layer_submods]
     # first get the patching effect of everything on y
@@ -92,7 +93,7 @@ def get_residual_node_scores(
         {},
         metric_fn,
         metric_kwargs=metric_kwargs,
-        method='ig' # get better approximations for early layers by using ig
+        method=method
     )
 
     nodes: dict[Any, Any] = {'y' : total_effect}
@@ -125,6 +126,7 @@ def get_circuit(
         nodes_only=False,
         node_threshold=0.1,
         edge_threshold=0.01,
+        method='ig' # get better approximations for early layers by using ig
 ):
     all_submods = [embed] + [submod for layer_submods in zip(mlps, attns, resids) for submod in layer_submods]
     # first get the patching effect of everything on y
@@ -136,7 +138,7 @@ def get_circuit(
         dictionaries,
         metric_fn,
         metric_kwargs=metric_kwargs,
-        method='ig' # get better approximations for early layers by using ig
+        method=method 
     )
 
     def unflatten(tensor): # will break if dictionaries vary in size between layers
@@ -176,7 +178,7 @@ def get_circuit(
             model,
             dictionaries,
             downstream,
-            features_by_submod[downstream],
+            features_by_submod[downstream.path],
             upstream,
             grads[downstream],
             deltas[upstream],
@@ -211,9 +213,9 @@ def get_circuit(
             model,
             dictionaries,
             mlp,
-            features_by_submod[resid],
+            features_by_submod[resid.path],
             prev_resid,
-            {feat_idx : unflatten(mlp_resid_grad[feat_idx].to_dense()) for feat_idx in features_by_submod[resid]},
+            {feat_idx : unflatten(mlp_resid_grad[feat_idx].to_dense()) for feat_idx in features_by_submod[resid.path]},
             deltas[prev_resid],
         )
         RAR_effect = jvp(
@@ -221,9 +223,9 @@ def get_circuit(
             model,
             dictionaries,
             attn,
-            features_by_submod[resid],
+            features_by_submod[resid.path],
             prev_resid,
-            {feat_idx : unflatten(attn_resid_grad[feat_idx].to_dense()) for feat_idx in features_by_submod[resid]},
+            {feat_idx : unflatten(attn_resid_grad[feat_idx].to_dense()) for feat_idx in features_by_submod[resid.path]},
             deltas[prev_resid],
         )
         RR_effect, _ = N(prev_resid, resid)

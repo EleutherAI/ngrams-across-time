@@ -277,44 +277,64 @@ def main():
                 checkpoint_eap_data[epoch]['residual_ig_patch_y'] =  nodes['y'].item()
                 checkpoint_eap_data[epoch]['residual_ig_patch_entropy'] = get_entropy(nodes)
 
-                # Integrated gradient scores on SAE nodes with zero ablation
                 model.remove_all_hooks()
                 nodes, edges = get_circuit(train_data, None, 
                                         language_model, embed, attns, mlps, 
                                         resids, dictionaries, metric_fn, aggregation="sum",
-                                        nodes_only=True, node_threshold=0.01)
-                checkpoint_eap_data[epoch]['sae_ig_zero_nodes'] = nodes
-                checkpoint_eap_data[epoch]['sae_ig_zero_y'] = nodes['y'].item()
-                checkpoint_eap_data[epoch]['sae_ig_zero_entropy'] = get_entropy(nodes)
+                                        nodes_only=True, node_threshold=0.01, method="grad")
+                checkpoint_eap_data[epoch]['sae_grad_zero_nodes'] = nodes
+                checkpoint_eap_data[epoch]['sae_grad_zero_y'] = nodes['y'].item()
+                checkpoint_eap_data[epoch]['sae_grad_zero_entropy'] = get_entropy(nodes)
 
                 # Integrated gradient scores on SAE nodes with patch ablation
                 model.remove_all_hooks()
                 nodes, edges = get_circuit(train_data, patch_train_data, 
                                         language_model, embed, attns, mlps, 
                                         resids, dictionaries, metric_fn, aggregation="sum",
-                                        nodes_only=True, node_threshold=0.01)
-                checkpoint_eap_data[epoch]['sae_ig_patch_nodes'] = nodes
-                checkpoint_eap_data[epoch]['sae_ig_patch_y'] =  nodes['y'].item()
-                checkpoint_eap_data[epoch]['sae_ig_patch_entropy'] = get_entropy(nodes)
+                                        nodes_only=True, node_threshold=0.01, method="grad")
+                checkpoint_eap_data[epoch]['sae_grad_patch_nodes'] = nodes
+                checkpoint_eap_data[epoch]['sae_grad_patch_y'] =  nodes['y'].item()
+                checkpoint_eap_data[epoch]['sae_grad_patch_entropy'] = get_entropy(nodes)
 
-                # AtP scores on SAE nodes with zero ablation
-                model.remove_all_hooks()
-                nodes, edges = get_circuit(train_data, None, 
-                                        language_model, embed, attns, mlps, 
-                                        resids, dictionaries, metric_fn, aggregation="sum",
-                                        nodes_only=True, node_threshold=0.01, method="attrib")
-                checkpoint_eap_data[epoch]['sae_atp_zero_nodes'] = nodes
-                checkpoint_eap_data[epoch]['sae_atp_zero_y'] =  nodes['y'].item()
-                checkpoint_eap_data[epoch]['sae_atp_zero_entropy'] = get_entropy(nodes)
 
-                # AtP scores on residual nodes with zero ablation
-                model.remove_all_hooks()
-                nodes = get_residual_node_scores(train_data, None, 
-                                        language_model, embed, attns, mlps, 
-                                        resids, metric_fn, aggregation="sum", method="attrib")
-                checkpoint_eap_data[epoch]['residual_atp_zero_nodes'] = nodes
-                checkpoint_eap_data[epoch]['residual_atp_zero_y'] =  nodes['y'].item()
-                checkpoint_eap_data[epoch]['residual_atp_zero_entropy'] = get_entropy(nodes)
+                # Integrated gradient scores on SAE nodes with zero ablation
+                # model.remove_all_hooks()
+                # nodes, edges = get_circuit(train_data, None, 
+                #                         language_model, embed, attns, mlps, 
+                #                         resids, dictionaries, metric_fn, aggregation="sum",
+                #                         nodes_only=True, node_threshold=0.01)
+                # checkpoint_eap_data[epoch]['sae_ig_zero_nodes'] = nodes
+                # checkpoint_eap_data[epoch]['sae_ig_zero_y'] = nodes['y'].item()
+                # checkpoint_eap_data[epoch]['sae_ig_zero_entropy'] = get_entropy(nodes)
+
+                # # Integrated gradient scores on SAE nodes with patch ablation
+                # model.remove_all_hooks()
+                # nodes, edges = get_circuit(train_data, patch_train_data, 
+                #                         language_model, embed, attns, mlps, 
+                #                         resids, dictionaries, metric_fn, aggregation="sum",
+                #                         nodes_only=True, node_threshold=0.01)
+                # checkpoint_eap_data[epoch]['sae_ig_patch_nodes'] = nodes
+                # checkpoint_eap_data[epoch]['sae_ig_patch_y'] =  nodes['y'].item()
+                # checkpoint_eap_data[epoch]['sae_ig_patch_entropy'] = get_entropy(nodes)
+
+                # # AtP scores on SAE nodes with zero ablation
+                # model.remove_all_hooks()
+                # nodes, edges = get_circuit(train_data, None, 
+                #                         language_model, embed, attns, mlps, 
+                #                         resids, dictionaries, metric_fn, aggregation="sum",
+                #                         nodes_only=True, node_threshold=0.01, method="attrib")
+                # checkpoint_eap_data[epoch]['sae_atp_zero_nodes'] = nodes
+                # checkpoint_eap_data[epoch]['sae_atp_zero_y'] =  nodes['y'].item()
+                # checkpoint_eap_data[epoch]['sae_atp_zero_entropy'] = get_entropy(nodes)
+
+                # # AtP scores on residual nodes with zero ablation
+                # model.remove_all_hooks()
+                # nodes = get_residual_node_scores(train_data, None, 
+                #                         language_model, embed, attns, mlps, 
+                #                         resids, metric_fn, aggregation="sum", method="attrib")
+                # checkpoint_eap_data[epoch]['residual_atp_zero_nodes'] = nodes
+                # checkpoint_eap_data[epoch]['residual_atp_zero_y'] =  nodes['y'].item()
+                # checkpoint_eap_data[epoch]['residual_atp_zero_entropy'] = get_entropy(nodes)
 
             if args.loss:
                 model.remove_all_hooks()

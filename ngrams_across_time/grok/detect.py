@@ -303,8 +303,7 @@ def main():
                                             language_model, embed, attns, mlps, 
                                             resids, dictionaries, metric_fn, aggregation="sum",
                                             nodes_only=True, node_threshold=0.01, method=method)
-                    checkpoint_eap_data[epoch][f'sae_{method}_patch'] = {'nodes': nodes}
-                
+                    checkpoint_eap_data[epoch][f'sae_{method}_patch'] = {'nodes': nodes}                
 
             # A random classifier's accuracy is 1/113 = 0.0088, resulting in a loss of 4.7330
             random_loss = -math.log(1/113)

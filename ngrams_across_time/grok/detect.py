@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 import random
 from pathlib import Path
 
+from scipy import stats
 import torch.nn.functional as F
 import torch
 import numpy as np
@@ -78,6 +79,7 @@ def get_top_sae_nodes(nodes: dict[Any, Any], num_nodes: int) -> dict[str, tuple[
         top_nodes_dict[submodule_path].append((score, idx))
     return dict(top_nodes_dict) # type: ignore
 
+
 def get_top_residual_nodes(nodes: dict[Any, Any], num_nodes: int) -> dict[str, tuple[float, int]]:
     '''Dict of submodule path to list of num_nodes node scores in descending order'''
     top_nodes = []
@@ -98,7 +100,6 @@ def get_top_residual_nodes(nodes: dict[Any, Any], num_nodes: int) -> dict[str, t
     return dict(top_nodes_dict) # type: ignore
 
 
-
 def all_node_scores(checkpoint_scores) -> list[float]:
         scores = []
         for node, values in checkpoint_scores.items():
@@ -111,20 +112,36 @@ def all_node_scores(checkpoint_scores) -> list[float]:
         return scores
 
 
-def get_entropy(nodes):
-    scores = all_node_scores(nodes)
+def abs_score_entropy(nodes):
+    scores = [abs(score) for score in all_node_scores(nodes)]
     sum_scores = sum(scores)
 
     probs = np.array([score / sum_scores for score in scores])
-    with np.errstate(divide='ignore', invalid='ignore'):
-        entropy = -np.nansum(probs * np.log(probs)) # type: ignore
-    return entropy.item()
+    return stats.entropy(probs)
+
+
+def min_nodes_to_random(node_scores, model, train_data, patch_data, language_model, all_submods, metric_fn, dictionaries):
+    random_loss = -math.log(1/113)
+
+    start = 0
+    end = len(all_node_scores(node_scores))
+    mid = (start + end) // 2
+    while start < end:
+        # Always hit max number of nodes with zero ablations because there is some information in every node
+        top_nodes = get_top_residual_nodes(node_scores, mid)
+        loss, patch_loss, clean_loss = patch_nodes(train_data, patch_data, language_model, all_submods, dictionaries, metric_fn, top_nodes)
+        if loss.mean().item() >= random_loss:
+            end = mid
+        else:
+            start = mid + 1
+        mid = (start + end) // 2
+    return mid
 
 
 def get_args():
     parser = ArgumentParser()
-    parser.add_argument("--patch", action="store_true")
-    parser.add_argument("--loss", action="store_true")
+    parser.add_argument("--nodes", action="store_true")
+    parser.add_argument("--circuit_size", action="store_true")
     parser.add_argument("--residual", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--model_seed", type=int, default=999, help="Model seed to load checkpoints for")
@@ -140,7 +157,7 @@ def main():
     MODEL_PATH = Path(f"workspace/grok/{run_identifier}.pth")
     cached_data = torch.load(MODEL_PATH)
     
-    OUT_PATH = Path(f"workspace/eap_data/{run_identifier}.pth")
+    OUT_PATH = Path(f"workspace/inference/{run_identifier}.pth")
     OUT_PATH.parent.mkdir(exist_ok=True, parents=True)
 
     model_checkpoints = cached_data["checkpoints"][::5]
@@ -195,9 +212,8 @@ def main():
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
     checkpoint_eap_data = torch.load(OUT_PATH) if OUT_PATH.exists() else {}
-    if args.patch or args.loss or args.residual:
+    if args.circuit_size or args.residual or args.nodes:
         for epoch, state_dict in tqdm(list(zip(checkpoint_epochs, model_checkpoints))):
-            model.remove_all_hooks()
             model.load_state_dict(state_dict)
             model.cuda() # type: ignore
 
@@ -249,219 +265,123 @@ def main():
                     os.path.join(sae_path, f'blocks.{i}.hook_resid_post'),
                     device=device
                 )
+            all_submods = [embed] + [submod for layer_submods in zip(mlps, attns, resids) for submod in layer_submods]
 
             if args.residual:
-                all_submods = [embed] + [submod for layer_submods in zip(mlps, attns, resids) for submod in layer_submods]
                 loss_all_saes, mean_res_norm, mse = sae_loss(train_data, language_model, all_submods, dictionaries, metric_fn)
-
                 checkpoint_eap_data[epoch]['sae_loss'] = loss_all_saes.mean().item()
                 checkpoint_eap_data[epoch]['sae_mse'] = mse
                 checkpoint_eap_data[epoch]['mean_res_norm'] = mean_res_norm
             
-            if args.patch:
-                # Integrated gradient scores on residual nodes with zero ablation
-                model.remove_all_hooks()
-                nodes = get_residual_node_scores(train_data, None, 
+            if args.nodes:
+                for method in ["ig", "grad", "attrib"]:
+                    # Residual node scores with zero ablation
+                    nodes = get_residual_node_scores(train_data, None, 
                                         language_model, embed, attns, mlps, 
-                                        resids, metric_fn, aggregation="sum")
-                checkpoint_eap_data[epoch]['residual_ig_zero_nodes'] = nodes
-                checkpoint_eap_data[epoch]['residual_ig_zero_y'] =  nodes['y'].item()
-                checkpoint_eap_data[epoch]['residual_ig_zero_entropy'] = get_entropy(nodes)
+                                        resids, metric_fn, aggregation="sum", method=method)
+                    checkpoint_eap_data[epoch][f'residual_{method}_zero'] = {'nodes': nodes}
 
-                # Integrated gradient scores on residual nodes with patch ablation
-                model.remove_all_hooks()
-                nodes = get_residual_node_scores(train_data, patch_train_data, 
+                    # SAE node scores with zero ablation
+                    nodes, _ = get_circuit(train_data, None, 
+                                            language_model, embed, attns, mlps, 
+                                            resids, dictionaries, metric_fn, aggregation="sum",
+                                            nodes_only=True, node_threshold=0.01, method=method)
+                    checkpoint_eap_data[epoch][f'sae_{method}_zero'] = {'nodes': nodes}
+
+                    # Gradient scores don't use an activation delta
+                    if method == "grad":
+                        continue
+
+                    # Residual node scores with patch ablation
+                    nodes = get_residual_node_scores(train_data, patch_train_data, 
                                         language_model, embed, attns, mlps, 
-                                        resids, metric_fn, aggregation="sum")
-                checkpoint_eap_data[epoch]['residual_ig_patch_nodes'] = nodes
-                checkpoint_eap_data[epoch]['residual_ig_patch_y'] =  nodes['y'].item()
-                checkpoint_eap_data[epoch]['residual_ig_patch_entropy'] = get_entropy(nodes)
+                                        resids, metric_fn, aggregation="sum", method=method)
+                    checkpoint_eap_data[epoch][f'residual_{method}_patch'] = {'nodes': nodes}
 
-                # Integrated gradient scores on SAE nodes with zero ablation
-                model.remove_all_hooks()
-                nodes, edges = get_circuit(train_data, None, 
-                                        language_model, embed, attns, mlps, 
-                                        resids, dictionaries, metric_fn, aggregation="sum",
-                                        nodes_only=True, node_threshold=0.01)
-                checkpoint_eap_data[epoch]['sae_ig_zero_nodes'] = nodes
-                checkpoint_eap_data[epoch]['sae_ig_zero_y'] = nodes['y'].item()
-                checkpoint_eap_data[epoch]['sae_ig_zero_entropy'] = get_entropy(nodes)
-
-                # Integrated gradient scores on SAE nodes with patch ablation
-                model.remove_all_hooks()
-                nodes, edges = get_circuit(train_data, patch_train_data, 
-                                        language_model, embed, attns, mlps, 
-                                        resids, dictionaries, metric_fn, aggregation="sum",
-                                        nodes_only=True, node_threshold=0.01)
-                checkpoint_eap_data[epoch]['sae_ig_patch_nodes'] = nodes
-                checkpoint_eap_data[epoch]['sae_ig_patch_y'] =  nodes['y'].item()
-                checkpoint_eap_data[epoch]['sae_ig_patch_entropy'] = get_entropy(nodes)
-
-                # AtP scores on SAE nodes with zero ablation
-                model.remove_all_hooks()
-                nodes, edges = get_circuit(train_data, None, 
-                                        language_model, embed, attns, mlps, 
-                                        resids, dictionaries, metric_fn, aggregation="sum",
-                                        nodes_only=True, node_threshold=0.01, method="attrib")
-                checkpoint_eap_data[epoch]['sae_atp_zero_nodes'] = nodes
-                checkpoint_eap_data[epoch]['sae_atp_zero_y'] =  nodes['y'].item()
-                checkpoint_eap_data[epoch]['sae_atp_zero_entropy'] = get_entropy(nodes)
-
-                # AtP scores on residual nodes with zero ablation
-                model.remove_all_hooks()
-                nodes = get_residual_node_scores(train_data, None, 
-                                        language_model, embed, attns, mlps, 
-                                        resids, metric_fn, aggregation="sum", method="attrib")
-                checkpoint_eap_data[epoch]['residual_atp_zero_nodes'] = nodes
-                checkpoint_eap_data[epoch]['residual_atp_zero_y'] =  nodes['y'].item()
-                checkpoint_eap_data[epoch]['residual_atp_zero_entropy'] = get_entropy(nodes)
-
-            if args.loss:
-                model.remove_all_hooks()
-                # Save the loss increase when ablating top 10 nodes
-                num_nodes = 10
-                top_residual_ig_patch_nodes = get_top_residual_nodes(
-                    checkpoint_eap_data[epoch]['residual_ig_patch_nodes'], num_nodes)
-                all_submods = [embed] + [submod for layer_submods in zip(mlps, attns, resids) for submod in layer_submods]
-                loss, patch_loss, clean_loss = patch_nodes(
-                    train_data, None, language_model, 
-                    all_submods, dictionaries, metric_fn, top_residual_ig_patch_nodes)
-                checkpoint_eap_data[epoch]['circuit_patch_ablation_loss'] = loss.mean().item()
-
-                loss, patch_loss, clean_loss = patch_nodes(
-                    train_data, patch_train_data, language_model, 
-                    all_submods, dictionaries, metric_fn, top_residual_ig_patch_nodes)
+                    # SAE node scores with patch ablation
+                    nodes, _ = get_circuit(train_data, patch_train_data, 
+                                            language_model, embed, attns, mlps, 
+                                            resids, dictionaries, metric_fn, aggregation="sum",
+                                            nodes_only=True, node_threshold=0.01, method=method)
+                    checkpoint_eap_data[epoch][f'sae_{method}_patch'] = {'nodes': nodes}
                 
-                checkpoint_eap_data[epoch]['circuit_ablation_loss'] = loss.mean().item()
-                checkpoint_eap_data[epoch]['clean_loss'] = clean_loss.mean().item()
-                checkpoint_eap_data[epoch]['patch_loss'] = patch_loss.mean().item() # type: ignore
-                checkpoint_eap_data[epoch]['ablation_loss_increase'] = (loss - clean_loss).mean().item()
+
+            # A random classifier's accuracy is 1/113 = 0.0088, resulting in a loss of 4.7330
+            random_loss = -math.log(1/113)
+            average_loss = checkpoint_eap_data[epoch]['train_loss']
+            loss_increase_to_random = random_loss - average_loss
+
+            for node_score_type in [
+                    'residual_ig_zero', 'sae_ig_zero', 'sae_attrib_zero', 'residual_attrib_zero', 'residual_grad_zero', 
+                    'sae_grad_zero', 'sae_ig_patch', 'residual_ig_patch', 'sae_attrib_patch', 'residual_attrib_patch'
+                ]:
+                nodes = checkpoint_eap_data[epoch][node_score_type]['nodes']
+                
+                # 1. Entropy measure
+                # 2. Linearized approximation of number of nodes to ablate to achieve random accuracy
+                checkpoint_eap_data[epoch][node_score_type]['entropy'] = abs_score_entropy(nodes)
+
+                scores = all_node_scores(nodes)
+                sorted_scores = np.sort(scores)
+                positive_scores = sorted_scores[sorted_scores > 0]
+                proxy_nodes_to_ablate = np.searchsorted(np.cumsum(positive_scores), loss_increase_to_random)
+                checkpoint_eap_data[epoch][node_score_type][f'linearized_circuit_feature_count'] = proxy_nodes_to_ablate
 
                 # Binary search for the number of nodes to ablate to reach random accuracy
-                # A random classifier's accuracy is 1/113 = 0.0088, with a loss of 4.7330
-                random_loss = -math.log(1/113)
+                if args.circuit_size:
+                    num_features = min_nodes_to_random(
+                        checkpoint_eap_data[epoch][node_score_type]['nodes'], model, train_data, None,
+                        language_model, all_submods, metric_fn, dictionaries
+                    )
+                    checkpoint_eap_data[epoch][node_score_type][f'circuit_feature_count'] = num_features
 
-                start = 0
-                end = 4000
-                mid = (start + end) // 2
-                while start < end:
-                    model.remove_all_hooks()
-                    top_residual_ig_zero_nodes = get_top_residual_nodes(
-                        checkpoint_eap_data[epoch]['residual_ig_patch_nodes'], mid)
-                    loss, patch_loss, clean_loss = patch_nodes(
-                        train_data, patch_train_data, language_model, 
-                        all_submods, dictionaries, metric_fn, top_residual_ig_zero_nodes)
-                    if loss.mean().item() >= random_loss:
-                        end = mid
-                    else:
-                        start = mid + 1
-                    mid = (start + end) // 2
-
-                print(f'patched loss at {mid} nodes and epoch {epoch} against vs. target loss ~4.7:\
-                {loss.mean().item()}, clean loss: {clean_loss.mean().item()}, patch loss: {patch_loss.mean().item() if patch_loss is not None else 0}') 
-                
-                checkpoint_eap_data[epoch]['min_residual_nodes_to_ablate'] = mid
-
-                start = 0
-                end = 4000
-                mid = (start + end) // 2
-                while start < end:
-                    model.remove_all_hooks()
-                    top_sae_ig_zero_nodes = get_top_sae_nodes(
-                        checkpoint_eap_data[epoch]['sae_ig_patch_nodes'], mid)
-                    loss, patch_loss, clean_loss = patch_nodes(
-                        train_data, patch_train_data, language_model, 
-                        all_submods, dictionaries, metric_fn, top_sae_ig_zero_nodes)
-                    if loss.mean().item() >= random_loss:
-                        end = mid
-                    else:
-                        start = mid + 1
-                    mid = (start + end) // 2
-
-                print(f'patched loss at {mid} nodes and epoch {epoch} against vs. target loss ~4.7:\
-                {loss.mean().item()}, clean loss: {clean_loss.mean().item()}, patch loss: {patch_loss.mean().item() if patch_loss is not None else 0}') 
-                
-                checkpoint_eap_data[epoch]['min_sae_nodes_to_ablate'] = mid
         torch.save(checkpoint_eap_data, OUT_PATH)
         
     checkpoint_eap_data = torch.load(OUT_PATH)
 
-    # combined_patch_sae_scores: list[list[float]] = [all_node_scores(scores['sae_ig_patch_nodes']) for scores in checkpoint_eap_data.values()]
-    # combined_residual_scores: list[list[float]] = [all_node_scores(scores['residual_atp_zero_nodes']) for scores in checkpoint_eap_data.values()]
-    # abs_sum_scores = [sum([abs(score) for score in scores]) for scores in combined_patch_sae_scores]
-    # abs_sum_residual_scores = [sum([abs(score) for score in scores]) for scores in combined_residual_scores]
-    # square_sum_scores = [sum([score ** 2 for score in scores]) for scores in combined_patch_sae_scores]
+    def add_scores_if_exists(fig, key: str, score_type: str | None, name: str, normalize: bool = True):
+        if key in checkpoint_eap_data[checkpoint_epochs[0]][score_type].keys():
+            scores = [scores[score_type][key] for scores in checkpoint_eap_data.values()]
+            if normalize:
+                # Normalize scores to be between 0 and 1
+                max_score = max(scores)
+                scores = [score / max_score for score in scores]
+            fig.add_trace(go.Scatter(x=checkpoint_epochs, y=scores, mode='lines', name=name))
+        else:
+            print(f"Skipping {name} because it does not exist in the checkpoint")
 
-    # normalized_scores = [
-    #     [score / checkpoint_eap_data[epoch]['sae_ig_patch_y'] for score in scores] 
-    #     for scores, epoch in zip(combined_patch_sae_scores, checkpoint_eap_data.keys())
-    # ]
-    # thresholded_normalized_scores = [np.array(scores)[np.abs(scores) > 0.01] for scores in normalized_scores]
+    for node_score_type in [
+        'residual_ig_zero', 'sae_ig_zero', 'sae_attrib_zero', 'residual_attrib_zero',
+        'residual_grad_zero', 'sae_grad_zero', 'sae_ig_patch', 'residual_ig_patch', 'sae_attrib_patch', 'residual_attrib_patch'
+    ]:
+        fig = go.Figure()
+        # Underlying model and task stats
+        add_scores_if_exists(fig, 'train_loss', None, 'Train loss')
+        add_scores_if_exists(fig, 'test_loss', None, 'Test loss')
+        add_scores_if_exists(fig, 'parameter_norm', None, 'Parameter norm')
 
-    fig = go.Figure()
-    # Underlying model and task stats
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['train_loss'] for scores in checkpoint_eap_data.values()], mode='lines', name='Train loss'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['test_loss'] for scores in checkpoint_eap_data.values()], mode='lines', name='Test loss'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['parameter_norm'] for scores in checkpoint_eap_data.values()], mode='lines', name='Parameter norm'))
-    # Nodes to ablate to reach random classifier performance
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['min_sae_nodes_to_ablate'] for scores in checkpoint_eap_data.values()], mode='lines', name='Number of SAE nodes to ablate for random accuracy'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['min_residual_nodes_to_ablate'] for scores in checkpoint_eap_data.values()], mode='lines', name='Number of residual nodes to ablate for random accuracy'))
-    # Node entropies
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['sae_ig_zero_entropy'] for scores in checkpoint_eap_data.values()], mode='lines', name='SAE Node zero ablation entropy (IG)'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['sae_atp_zero_entropy'] for scores in checkpoint_eap_data.values()], mode='lines', name='SAE Node zero ablation entropy (AtP)'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['sae_ig_patch_entropy'] for scores in checkpoint_eap_data.values()], mode='lines', name='SAE Node patch entropy (IG)'))
-    # fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['sae_atp_patch_entropy'] for scores in checkpoint_eap_data.values()], mode='lines', name='SAE Node patch entropy (AtP)'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['residual_ig_patch_entropy'] for scores in checkpoint_eap_data.values()], mode='lines', name='Residual patched node entropy (IG)'))
-    # fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['residual_atp_patch_entropy'] for scores in checkpoint_eap_data.values()], mode='lines', name='Residual patched node entropy (AtP)'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['residual_ig_zero_entropy'] for scores in checkpoint_eap_data.values()], mode='lines', name='Residual zero ablation node entropy (IG)'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['residual_atp_zero_entropy'] for scores in checkpoint_eap_data.values()], mode='lines', name='Residual zero ablation node entropy (AtP)'))
-    # SAE summary stats
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['sae_loss'] for scores in checkpoint_eap_data.values()], mode='lines', name='SAE loss'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['sae_mse'] for scores in checkpoint_eap_data.values()], mode='lines', name='SAE MSE'))
-    fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['mean_res_norm'] for scores in checkpoint_eap_data.values()], mode='lines', name='mean SAE residual norm'))
-    # AtP and integrated gradient node scores
-    # fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[len(item) for item in thresholded_normalized_scores], mode='lines', name='Number of features above normalized score threshold'))
-    # fig.add_trace(go.Scatter(x=checkpoint_epochs, y=abs_sum_scores, mode='lines', name='Sum of absolute scores'))
-    # fig.add_trace(go.Scatter(x=checkpoint_epochs, y=abs_sum_residual_scores, mode='lines', name='Sum of absolute residual scores'))
-    # fig.add_trace(go.Scatter(x=checkpoint_epochs, y=square_sum_scores, mode='lines', name='Sum of squared scores'))
+        ablation = '0' if 'zero' in node_score_type else 'patch'
+        type = 'IG' if 'ig' in node_score_type else 'AtP'
+        node_type = 'Residual' if 'residual' in node_score_type else 'SAE'
 
-    fig.update_layout(title=f"Grokking Loss and Node Entropy over Epochs for seed {args.model_seed}", xaxis_title="Epoch", yaxis_title="Loss")                                           
-    fig.show()
-    breakpoint()
+        add_scores_if_exists(fig, 'entropy', node_score_type, f'H({node_type} Nodes) {ablation} ablation, {type}')
+        # Nodes to ablate to reach random classifier performance
+        add_scores_if_exists(fig, 'linearized_circuit_feature_count', node_score_type, f'Proxy num nodes in circuit, {ablation}, {type}, {node_type}')
+        add_scores_if_exists(fig, 'circuit_feature_count', node_score_type, f'Num nodes in circuit, {ablation}, {type}, {node_type}')
+    
+        # SAE summary stats
+        # add_scores_if_exists(fig, 'sae_loss', 'SAE loss') 
+        # add_scores_if_exists(fig, 'sae_mse', 'SAE MSE')
+        # add_scores_if_exists(fig, 'mean_res_norm', 'mean SAE residual norm')
+
+        fig.update_layout(
+            title=f"Grokking Loss and Node Entropy over Epochs for seed {run_identifier} and node score type {node_score_type.replace('_', ' ')}", 
+            xaxis_title="Epoch", 
+            yaxis_title="Loss",
+            width=1000
+        )                                           
+        fig.write_image(f'detect_{run_identifier}_{node_score_type}.pdf', format='pdf')
 
     
 if __name__ == "__main__":
     main()
-
-
-# Unused metrics code
-
-# fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['patch_loss'] for scores in checkpoint_eap_data.values()], mode='lines', name='Patch loss'))
-# fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['clean_loss'] for scores in checkpoint_eap_data.values()], mode='lines', name='Clean loss'))
-# fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['circuit_ablation_loss'] for scores in checkpoint_eap_data.values()], mode='lines', name='Circuit ablation loss @ 10 nodes'))
-# fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['ablation_loss_increase'] for scores in checkpoint_eap_data.values()], mode='lines', name='Circuit ablation loss increase'))
-# fig.add_trace(go.Scatter(x=checkpoint_epochs, y=[scores['circuit_zero_ablation_loss'] for scores in checkpoint_eap_data.values()], mode='lines', name='Circuit zero ablation loss'))
-
-# def all_edge_scores(checkpoint_scores):
-#     scores = []
-#     for upstream_node, downstream_modes in checkpoint_scores.items():
-#         if upstream_node == 'y':
-#             continue
-#         for downstream_node, value in downstream_modes.items():
-#             value = assert_type(Tensor, value) # torch.sparse_coo_tensor
-#             # ignore edge index, just grab its value
-#             scores.extend(value.values().tolist())
-#     return scores
-
-
-# memorization_end_epoch = 1500
-# circuit_formation_end_epoch = 12500
-# cleanup_end_epoch = 18_500
-
-# def add_lines(figure):
-#     figure.add_vline(memorization_end_epoch, line_dash="dash", opacity=0.7)
-#     figure.add_vline(circuit_formation_end_epoch, line_dash="dash", opacity=0.7)
-#     figure.add_vline(cleanup_end_epoch, line_dash="dash", opacity=0.7)
-#     return figure
-
-# fig = add_lines(fig)

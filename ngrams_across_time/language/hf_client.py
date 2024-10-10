@@ -95,7 +95,7 @@ def load_with_retries(model_name: str, revision: str, model_size: int, retries: 
             torch_dtype="auto",
             revision=revision,
             cache_dir=".cache",
-            quantization_config=BitsAndBytesConfig(load_in_4bit=True) if model_size > 6e9 else None
+            quantization_config=BitsAndBytesConfig(load_in_8bit=True) if model_size > 6e9 else None
         ).cuda()
 
     return with_retries(load, retries)

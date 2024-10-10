@@ -21,7 +21,7 @@ def patch_nodes(
         nodes,
         metric_kwargs=dict(),
 ):
-    num_latents = next(iter(dictionaries.values())).num_latents
+    num_latents = next(iter(dictionaries.values())).num_latents if dictionaries else None
     # first run through the fake inputs to figure out which hidden states are tuples
     is_tuple = {}
     with model.scan("_"):
@@ -32,11 +32,15 @@ def patch_nodes(
     # scan=True must be set; otherwise faketensor shapes aren't populated and 
     # the reshape code will produce incorrect results (FAIL SILENTLY)
     with model.trace(clean, scan=True) as tracer, t.no_grad():
-        for i, submodule in enumerate(submodules):
-            dictionary = dictionaries[submodule]
+        for submodule in submodules:
             x = submodule.output
             if is_tuple[submodule]:
                 x = x[0]
+
+            if not submodule in dictionaries:
+                hidden_states_clean[submodule] = x.save()
+                continue
+            dictionary = dictionaries[submodule]
             
             flat_f = nnsight.apply(dictionary.forward, x.flatten(0, 1))
             f = ForwardOutput(
@@ -58,22 +62,31 @@ def patch_nodes(
     hidden_states_clean = {k : v.value for k, v in hidden_states_clean.items()}
 
     if patch is None:
-        hidden_states_patch = {
-            k : DenseAct( 
-                act=t.zeros_like(v.act), 
-                res=t.zeros_like(v.res)
-            ) for k, v in hidden_states_clean.items()
-        }
-        metric_patch = None
+        if dictionaries:
+            hidden_states_patch = {
+                k : DenseAct(
+                    act=t.zeros_like(v.act), 
+                    res=t.zeros_like(v.res)
+                ) for k, v in hidden_states_clean.items()
+            }
+        else:
+            hidden_states_patch = {
+                k : t.zeros_like(v) for k, v in hidden_states_clean.items()
+            }
+        metric_patch = t.tensor(float('-inf'))
     else:
         hidden_states_patch = {}
         with model.trace(patch, scan=True), t.no_grad():
             for submodule in submodules:
-                dictionary = dictionaries[submodule]
                 x = submodule.output
                 if is_tuple[submodule]:
                     # MLP activations are the same at every position
                     x = x[0]
+
+                if not submodule in dictionaries:
+                    hidden_states_patch[submodule] = x.save()
+                    continue
+                dictionary = dictionaries[submodule]
 
                 flat_f = nnsight.apply(dictionary.forward, x.flatten(0, 1))
                 f = ForwardOutput(
@@ -93,29 +106,44 @@ def patch_nodes(
             metric_patch = metric_fn(model.output.logits, **metric_kwargs).save()
         hidden_states_patch = {k : v.value for k, v in hidden_states_patch.items()}
 
-    with model.trace(clean, scan=True) as tracer:
+    with model.trace(clean, scan=True):
         for submodule in submodules:
-            dictionary = dictionaries[submodule]
+            dictionary = dictionaries[submodule] if submodule in dictionaries else None
             clean_state = hidden_states_clean[submodule]
             patch_state = hidden_states_patch[submodule]
             
-            alpha_act = torch.zeros_like(clean_state.act)
-            alpha_res = torch.zeros_like(clean_state.res)
-            if submodule.path in nodes:
-                feature_indices = [idx for score, idx in nodes[submodule.path]]
-                alpha_act[:, :, [idx for idx in feature_indices if idx != -1]] = 1.
-                if -1 in feature_indices:
-                    alpha_res[:] = 1.
+            alpha_complement = None
+            if dictionaries:
+                alpha_act = torch.zeros_like(clean_state.act)
+                alpha_res = torch.zeros_like(clean_state.res)
 
-            alpha = DenseAct(alpha_act, alpha_res)
-            alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, torch.ones_like(alpha_res) - alpha_res)
+                if submodule.path in nodes:
+                    feature_indices = [idx for score, idx in nodes[submodule.path]]
+                    alpha_act[:, :, [idx for idx in feature_indices if idx != -1]] = 1.
+                    if -1 in feature_indices:
+                        alpha_res[:] = 1.
+                
+                alpha = DenseAct(alpha_act, alpha_res)
+                alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, torch.ones_like(alpha_res) - alpha_res)
+            else:
+                alpha = torch.zeros_like(clean_state)
+                if submodule.path in nodes:
+                    feature_indices = [idx for score, idx in nodes[submodule.path]]
+                    alpha[:, :, [idx for idx in feature_indices if idx != -1]] = 1.
+                alpha_complement = torch.ones_like(alpha) - alpha
 
             masked_acts = (alpha_complement * clean_state + alpha * patch_state)
 
             if is_tuple[submodule]:
-                submodule.output[0][:] = (masked_acts.act @ dictionary.W_dec.mT.T) + masked_acts.res
+                if dictionary is None:
+                    submodule.output[0][:] = masked_acts
+                else:
+                    submodule.output[0][:] = (masked_acts.act @ dictionary.W_dec.mT.T) + masked_acts.res
             else:
-                submodule.output = (masked_acts.act @ dictionary.W_dec.mT.T) + masked_acts.res
+                if dictionary is None:
+                    submodule.output = masked_acts
+                else:
+                    submodule.output = (masked_acts.act @ dictionary.W_dec.mT.T) + masked_acts.res
 
         metric_patched = metric_fn(model.output.logits, **metric_kwargs).save()
 

@@ -18,6 +18,63 @@ else:
 
 EffectOut = namedtuple('EffectOut', ['effects', 'deltas', 'grads', 'total_effect'])
 
+def _e_grad(
+        clean,
+        model,
+        submodules,
+        dictionaries: dict[Any, Sae],
+        metric_fn,
+        metric_kwargs=dict(),
+):
+    num_latents = next(iter(dictionaries.values())).num_latents if dictionaries else None
+    
+    # Figure out which hidden states are tuples using a test input
+    is_tuple = {}
+    with model.scan("_"):
+        for submodule in submodules:
+            is_tuple[submodule] = type(submodule.output.shape) == tuple
+
+    grads = {}
+    with model.trace(clean, scan=True):
+        for submodule in submodules:
+            x = submodule.output
+            if is_tuple[submodule]:
+                x = x[0]
+
+            if not submodule in dictionaries:
+                grads[submodule] = x.grad.save()
+                continue
+
+            dictionary = dictionaries[submodule]
+            flat_f = nnsight.apply(dictionary.forward, x.flatten(0, 1))
+            f = ForwardOutput(
+                latent_acts=flat_f.latent_acts.reshape(x.shape[0], x.shape[1], -1),
+                latent_indices=flat_f.latent_indices.reshape(x.shape[0], x.shape[1], -1),
+                sae_out=flat_f.sae_out.reshape(x.shape[0], x.shape[1], -1),
+                fvu=flat_f.fvu,
+                auxk_loss=flat_f.auxk_loss,
+                multi_topk_fvu=flat_f.multi_topk_fvu
+            )
+
+            dense = to_dense(f.latent_acts, f.latent_indices, num_latents)
+            x_hat = dense @ dictionary.W_dec.mT.T
+            residual = x - x_hat
+
+            grads[submodule] = DenseAct(act=dense, res=residual).grad.save()
+            residual.grad = t.zeros_like(residual)
+            x_recon = x_hat + residual
+            if is_tuple[submodule]:
+                submodule.output[0][:] = x_recon
+            else:
+                submodule.output = x_recon
+            x.grad = x_recon.grad
+        
+        metric_fn(model.output.logits, **metric_kwargs).sum().backward()
+
+    grads = {k : v.value for k, v in grads.items()}
+    return EffectOut(grads, None, grads, t.tensor(float('-inf')))
+
+
 def _pe_attrib(
         clean,
         patch,
@@ -39,7 +96,6 @@ def _pe_attrib(
     grads = {}
     with model.trace(clean, scan=True):
         for submodule in submodules:
-            saved_x = submodule.output.save()
             x = submodule.output
             if is_tuple[submodule]:
                 x = x[0]
@@ -91,7 +147,7 @@ def _pe_attrib(
         total_effect = t.tensor(float('-inf'))
     else:
         hidden_states_patch = {}
-        with model.trace(patch, scan=True), t.inference_mode():
+        with model.trace(patch, scan=True): # , t.inference_mode():
             for submodule in submodules:
                 x = submodule.output
                 if is_tuple[submodule]:
@@ -147,8 +203,7 @@ def _pe_ig(
         steps=10,
         metric_kwargs=dict(),
 ):
-    if dictionaries:
-        num_latents = next(iter(dictionaries.values())).num_latents
+    num_latents = next(iter(dictionaries.values())).num_latents if dictionaries else None
     # first run through the fake inputs to figure out which hidden states are tuples
     is_tuple = {}
     with model.scan("_"):
@@ -402,6 +457,8 @@ def patching_effect(
         return _pe_ig(clean, patch, model, submodules, dictionaries, metric_fn, steps=steps, metric_kwargs=metric_kwargs)
     elif method == 'exact':
         return _pe_exact(clean, patch, model, submodules, dictionaries, metric_fn)
+    elif method == 'grad':
+        return _e_grad(clean, model, submodules, dictionaries, metric_fn, metric_kwargs=metric_kwargs)
     else:
         raise ValueError(f"Unknown method {method}")
 

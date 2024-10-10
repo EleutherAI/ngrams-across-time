@@ -115,21 +115,33 @@ def patch_nodes(
             alpha_complement = None
             if dictionaries:
                 alpha_act = torch.zeros_like(clean_state.act)
-                alpha_res = torch.zeros_like(clean_state.res)
+                alpha_res = None
+                alpha_resc = None 
 
                 if submodule.path in nodes:
-                    feature_indices = [idx for score, idx in nodes[submodule.path]]
-                    alpha_act[:, :, [idx for idx in feature_indices if idx != -1]] = 1.
-                    if -1 in feature_indices:
-                        alpha_res[:] = 1.
+                    act_indices = [idx for score, idx in nodes[submodule.path]]
+                    alpha_act[:, :, [idx for idx in act_indices if idx >= 0]] = 1.
+
+                    if clean_state.resc is not None:
+                        alpha_res = None
+                        if -1 in act_indices:
+                            alpha_resc = 1.
+                    else:
+                        alpha_resc = None
+                        alpha_res = torch.zeros_like(clean_state.res)
+                        res_indices = [-idx - 1 for idx in act_indices if idx < 0]
+                        alpha_res[:, :, res_indices] = 1.
                 
-                alpha = DenseAct(alpha_act, alpha_res)
-                alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, torch.ones_like(alpha_res) - alpha_res)
+                alpha = DenseAct(alpha_act, alpha_res, alpha_resc)
+                if clean_state.resc is not None:
+                    alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, torch.ones_like(alpha_res) - alpha_res)
+                else:
+                    alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, torch.ones_like(alpha_res) - alpha_res)
             else:
                 alpha = torch.zeros_like(clean_state)
                 if submodule.path in nodes:
-                    feature_indices = [idx for score, idx in nodes[submodule.path]]
-                    alpha[:, :, [idx for idx in feature_indices if idx != -1]] = 1.
+                    act_indices = [idx for score, idx in nodes[submodule.path]]
+                    alpha[:, :, [idx for idx in act_indices if idx != -1]] = 1.
                 alpha_complement = torch.ones_like(alpha) - alpha
 
             masked_acts = (alpha_complement * clean_state + alpha * patch_state)

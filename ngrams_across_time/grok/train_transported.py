@@ -1,50 +1,18 @@
 from dataclasses import dataclass
-from pathlib import Path
-import pickle
-from dataclasses import dataclass
-from pathlib import Path
 
 from tqdm import tqdm
 from datasets import ClassLabel, Dataset, DatasetDict, Features, Image, load_dataset
-import torchvision.transforms.v2.functional as TF
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch import Tensor
-# import torchvision.transforms as transforms
-from concept_erasure import QuadraticEditor, QuadraticFitter
+from concept_erasure import QuadraticEraser
 from concept_erasure.utils import assert_type
-from einops import rearrange
 from torch.utils.data import DataLoader, Dataset
 
 from ngrams_across_time.utils.utils import set_seeds
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-@dataclass
-class ConceptEditedDataset(Dataset):
-    class_probs: Tensor
-    editor: QuadraticEditor
-    X: Tensor
-    Y: Tensor
-
-    def __getitem__(self, idx: int) -> dict[str, Tensor]:
-        x, y = self.X[idx], int(self.Y[idx])
-
-        # Make sure we don't sample the correct class
-        loo_probs = self.class_probs.clone()
-        loo_probs[y] = 0
-        target_y = torch.multinomial(loo_probs, 1).squeeze()
-
-        x = self.editor.transport(x[None], y, int(target_y)).squeeze(0)
-        return {
-            "pixel_values": x,
-            "label": target_y,
-        }
-
-    def __len__(self) -> int:
-        return len(self.Y)
-
 
 def infer_columns(feats: Features) -> tuple[str, str]:
     # Infer the appropriate columns by their types
@@ -55,6 +23,26 @@ def infer_columns(feats: Features) -> tuple[str, str]:
     assert len(label_cols) == 1, f"Found {len(label_cols)} label columns"
 
     return img_cols[0], label_cols[0]
+
+@dataclass
+class ErasedDataset(Dataset):
+    eraser: QuadraticEraser
+    X: Tensor
+    Y: Tensor
+
+    def __getitem__(self, idx: int) -> dict[str, Tensor]:
+        x, y = self.X[idx], int(self.Y[idx])
+        x_erased = self.eraser.optimal_transport(y, x.unsqueeze(0)).squeeze(0)
+        x = x_erased.reshape(x.shape)
+        
+        return {
+            "pixel_values": x,
+            "label": torch.tensor(y),
+        }
+
+    def __len__(self) -> int:
+        return len(self.Y)
+
 
 
 class MLP(nn.Module):
@@ -93,8 +81,7 @@ def run_dataset(dataset_str: str, seed: int):
     edited_ds_train = load_edited_dataset('edited_train_dataset.pth')
     edited_ds_test = load_edited_dataset('edited_test_dataset.pth')
 
-    num_epochs = 50
-    batch_size = 256
+    num_epochs = 20_000
     learning_rate = 1e-3
 
     set_seeds(seed)
@@ -111,11 +98,13 @@ def run_dataset(dataset_str: str, seed: int):
     print(f"Classes in '{dataset_str}': {labels}")
 
     # CIFAR-10 dataset
-    # train_dataset = torchvision.datasets.CIFAR10(root='.', train=True, download=True, transform=transform)
-    # test_dataset = torchvision.datasets.CIFAR10(root='.', train=False, download=True, transform=transform)
+    # train_dataset = torchvision.datasets.CIFAR10(root='.', train=True, download=True) # transform=transform
+    # test_dataset = torchvision.datasets.CIFAR10(root='.', train=False, download=True) # transform=transform
+    # train_loader = DataLoader(train_dataset, batch_size=len(edited_ds_train) // 4, shuffle=True)
+    # test_loader = DataLoader(test_dataset, batch_size=len(edited_ds_test) // 4, shuffle=False)
 
-    train_loader = DataLoader(edited_ds_train, batch_size=len(edited_ds_train) // 4, shuffle=True)
-    test_loader = DataLoader(edited_ds_test, batch_size=len(edited_ds_test) // 4, shuffle=False)
+    train_loader = DataLoader(edited_ds_train, batch_size=len(edited_ds_train), shuffle=True)
+    test_loader = DataLoader(edited_ds_test, batch_size=len(edited_ds_test), shuffle=False)
 
     # Train the model
     input_size = 32 * 32 * 3  # CIFAR-10 images are 32x32 pixels with 3 color channels
@@ -125,36 +114,29 @@ def run_dataset(dataset_str: str, seed: int):
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-    total_step = len(train_loader)
+    images = edited_ds_train.data.to(device)
+    labels = edited_ds_train.labels.to(device)
+
     for epoch in tqdm(range(num_epochs)):
-        for i, batch in enumerate(train_loader):
-            images = batch['pixel_values'].to(device)
-            labels = batch['label'].to(device)
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
             
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            if (i + 1) % 100 == 0:
-                print(f'Epoch [{epoch + 1}/{num_epochs}], Step [{i+1}/{total_step}], Loss: {loss.item():.4f}')
+        if (epoch + 1) % 10 == 0:
+            print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}')
+            # model.eval()
+            with torch.no_grad():
+                test_images = edited_ds_test.data.to(device)
+                test_labels = edited_ds_test.labels.to(device)
+                outputs = model(test_images)
+                _, predicted = torch.max(outputs.data, 1)
+                total = test_labels.size(0)
+                correct = (predicted == test_labels).sum().item()
 
-    # Test the model
-    model.eval()
-    with torch.no_grad():
-        correct = 0
-        total = 0
-        for batch in test_loader:
-            images = batch['pixel_values'].to(device)
-            labels = batch['label'].to(device)
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-        print(f'Accuracy of the model on the 10000 test images: {100 * correct / total}%')
+            print(f'Accuracy of the model on the 10000 test images: {100 * correct / total}%')
 
     # Save the model
     torch.save(model.state_dict(), 'mlp_cifar10.pth')
@@ -184,44 +166,15 @@ def build_dataset(dataset_str: str):
 
     train = ds["train"].with_format("torch")
     X_train: Tensor = assert_type(Tensor, train[img_col]).div(255)
-    X_train = rearrange(X_train, "n h w c -> n c h w")
     Y_train = assert_type(Tensor, train[label_col])
 
     test = ds["test"].with_format("torch")
     X_test: Tensor = assert_type(Tensor, test[img_col]).div(255)
-    X_test = rearrange(X_test, "n h w c -> n c h w")
     Y_test = assert_type(Tensor, test[label_col])
 
-    print("Computing statistics...")
-    fitter_path = Path('fitter')
-    fitter_path.mkdir(exist_ok=True)
-    if (fitter_path / f"{dataset_str}_train.pth").exists():
-        fitter_train = torch.load(fitter_path / f"{dataset_str}_train.pth")
-        fitter_test = torch.load(fitter_path / f"{dataset_str}_test.pth")
-    else:
-        fitter_train = QuadraticFitter.fit(X_train.flatten(1).cuda(), Y_train.cuda())
-        torch.save(fitter_train, fitter_path / f"{dataset_str}_train.pth")
-        fitter_test = QuadraticFitter.fit(X_test.flatten(1).cuda(), Y_test.cuda())
-        torch.save(fitter_test, fitter_path / f"{dataset_str}_test.pth")
-    
-
-    class_probs = torch.bincount(Y_train).float()
-        
-    cache = Path('/mnt/ssd-1/lucia/features-across-time') / "editor-cache" / f"{dataset_str}.pkl"
-    if cache.exists():
-        with open(cache, "rb") as f:
-            editor = pickle.load(f)
-    else:
-        print("Computing optimal transport maps...")
-
-        editor = fitter_train.editor("cpu")
-        cache.parent.mkdir(exist_ok=True)
-
-        with open(cache, "wb") as f:
-            pickle.dump(editor, f)
-
-    edited_ds_train = ConceptEditedDataset(class_probs, editor, X_train, Y_train)
-    edited_ds_test = ConceptEditedDataset(class_probs, editor, X_test, Y_test)
+    eraser = QuadraticEraser.fit(X_train.flatten(1, 3), Y_train)
+    edited_ds_train = ErasedDataset(eraser, X_train, Y_train)
+    edited_ds_test = ErasedDataset(eraser, X_test, Y_test)
 
     def save_edited_dataset(dataset, filename, batch_size=256):
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
@@ -247,21 +200,5 @@ def build_dataset(dataset_str: str):
     save_edited_dataset(edited_ds_test, 'edited_test_dataset.pth')
 
 if __name__ == "__main__":
-    build_dataset("cifar10")
+    # build_dataset("cifar10")
     run_dataset("cifar10", 1)
-
-
-
-# def preprocess(batch):
-#     return {
-#         "pixel_values": [TF.to_tensor(x) for x in batch[img_col]],
-#         "label": torch.tensor(batch[label_col]),
-#     }
-
-# if val := ds.get("validation"):
-#     test = ds["test"].with_transform(preprocess) if "test" in ds else None
-#     val = val.with_transform(preprocess)
-# else:
-#     nontrain = ds["test"].train_test_split(train_size=1024, seed=seed)
-#     val = nontrain["train"].with_transform(preprocess)
-#     test = nontrain["test"].with_transform(preprocess)

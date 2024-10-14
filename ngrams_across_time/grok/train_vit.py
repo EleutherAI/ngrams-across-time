@@ -1,48 +1,76 @@
 from argparse import ArgumentParser
 from pathlib import Path
-import random
+from collections import defaultdict
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch import Tensor
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from transformers import ViTForImageClassification, ViTConfig
+from PIL import Image
 from datasets import Dataset as HfDataset, load_dataset
+from sae import SaeConfig, SaeTrainer, TrainConfig
 from tqdm import tqdm
 import lovely_tensors as lt
-from sae import SaeConfig, SaeTrainer, TrainConfig
 
 from ngrams_across_time.utils.utils import set_seeds, assert_type
 
 
 def create_balanced_sample(dataset: HfDataset, n):
-    dataset.set_format(type=None, columns=['pixel_values', 'label'])
-    num_classes = len(set(dataset['label']))
+    dataset.set_format(type='numpy', columns=['input_ids', 'label'])
+    labels = dataset['label']
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    num_classes = len(unique_labels)
     samples_per_class = n // num_classes
 
-    class_indices = {i: [] for i in range(num_classes)}
-    for idx, label in enumerate(dataset['label']):
+    class_indices = defaultdict(list)
+    for idx, label in enumerate(labels):
         class_indices[label].append(idx)
     
-    # Randomly select samples_per_class indices from each class
     balanced_indices = []
-    for class_idx in class_indices:
-        if len(class_indices[class_idx]) >= samples_per_class:
-            balanced_indices.extend(random.sample(class_indices[class_idx], samples_per_class))
+    for label in unique_labels:
+        if counts[label] >= samples_per_class:
+            balanced_indices.extend(np.random.choice(class_indices[label], size=samples_per_class, replace=False))
         else:
-            # If a class has fewer samples than required, take all available and randomly oversample
-            balanced_indices.extend(class_indices[class_idx])
-            balanced_indices.extend(random.choices(class_indices[class_idx], 
-                                                   k=samples_per_class - len(class_indices[class_idx])))
+            balanced_indices.extend(class_indices[label])
+            balanced_indices.extend(np.random.choice(class_indices[label], 
+                                                     size=samples_per_class - counts[label], 
+                                                     replace=True))
 
-
-    balanced_dataset = HfDataset.from_dict({
-        'pixel_values': [dataset['pixel_values'][i] for i in balanced_indices],
-        'label': [dataset['label'][i] for i in balanced_indices]
-    })
-    balanced_dataset.set_format(type='torch', columns=['pixel_values', 'label'])
+    balanced_dataset = dataset.select(balanced_indices)
+    balanced_dataset.set_format(type='torch', columns=['input_ids', 'label'])
     return balanced_dataset
+
+# def create_balanced_sample(dataset: HfDataset, n):
+#     dataset.set_format(type=None, columns=['input_ids', 'label'])
+#     num_classes = len(set(dataset['label']))
+#     samples_per_class = n // num_classes
+
+#     class_indices = {i: [] for i in range(num_classes)}
+#     for idx, label in enumerate(dataset['label']):
+#         class_indices[label].append(idx)
+    
+#     # Randomly select samples_per_class indices from each class
+#     balanced_indices = []
+#     for class_idx in class_indices:
+#         if len(class_indices[class_idx]) >= samples_per_class:
+#             balanced_indices.extend(random.sample(class_indices[class_idx], samples_per_class))
+#         else:
+#             # If a class has fewer samples than required, take all available and randomly oversample
+#             balanced_indices.extend(class_indices[class_idx])
+#             balanced_indices.extend(random.choices(class_indices[class_idx], 
+#                                                    k=samples_per_class - len(class_indices[class_idx])))
+
+
+#     balanced_dataset = HfDataset.from_dict({
+#         'input_ids': [dataset['input_ids'][i] for i in balanced_indices],
+#         'label': [dataset['label'][i] for i in balanced_indices]
+#     })
+#     balanced_dataset.set_format(type='torch', columns=['input_ids', 'label'])
+#     return balanced_dataset
     
 
 def mean_std(dataset: HfDataset, batch_size=1000, num_workers=4, num_channels=1):
@@ -84,50 +112,60 @@ num_epochs = 100
 learning_rate = 1e-4
 checkpoint_interval = 5
 
-from datasets import load_dataset
-from torchvision import transforms
-import torch
+def to_tensor(image):
+    return Image.fromarray(image)
 
-def transform_image(image):
-    transform = transforms.Compose([
-        transforms.Resize((32, 32)),
-        transforms.ToTensor()
-    ])
-    return transform(image)
-
-dataset = load_dataset("mnist", split='train')
-dataset = dataset.map(
-    lambda example: {"pixel_values": transform_image(example['image'])},
-    new_fingerprint='transformed_mnist'
+train_dataset: HfDataset = load_dataset("mnist", split='train') # type: ignore
+train_dataset = train_dataset.map(
+    function=lambda example: {
+        'input_ids': to_tensor(example['image']),
+        'label': example['label']
+    },
+    new_fingerprint='transformed_mnist', # type: ignore
+    keep_in_memory=True # type: ignore
 )
-dataset.set_format(type='torch', columns=['pixel_values', 'label'])
+train_dataset = train_dataset.with_format('torch')
 
-pixel_values = assert_type(torch.Tensor, dataset['pixel_values'])
-mean = pixel_values.mean().item()
-std = pixel_values.std().item()
-def full_transform(image):
+# Set format
+train_dataset = train_dataset.rename_column('pixel_values', 'input_ids')
+train_dataset.set_format(type='torch', columns=['input_ids', 'label'])
+print("Final columns:", train_dataset.column_names)
+
+test_dataset: HfDataset = load_dataset('mnist', split='test') # type: ignore
+test_dataset = test_dataset.map(
+    function=lambda example: {
+        'input_ids': to_tensor(example['image']),
+        'label': example['label']
+    },
+    new_fingerprint='transformed_mnist', # type: ignore
+    keep_in_memory=True # type: ignore
+)
+test_dataset = test_dataset.rename_column('pixel_values', 'input_ids')
+test_dataset.set_format(type='torch', columns=['input_ids', 'label'])
+
+# Calculate mean and std of pixel values
+input_ids = assert_type(Tensor, train_dataset['input_ids'])
+mean = input_ids.mean().item()
+std = input_ids.std().item()
+def normalize(image):
     transform = transforms.Compose([
-        transforms.Resize((32, 32)),
-        transforms.ToTensor(),
         transforms.Normalize((mean,), (std,))
     ])
     return transform(image)
 
-dataset = dataset.map(
-    lambda example: {"pixel_values": full_transform(example['image'])},
-    new_fingerprint='transformed_mnist'
-)
-
 # Induce overfitting by training on a small subset of the train set
-train_dataset = create_balanced_sample(dataset, 40)
-
-test_dataset = dataset = load_dataset("mnist", split='test')
-test_dataset = test_dataset.map(
-    lambda example: {"pixel_values": full_transform(example['image'])},
-    remove_columns=['image'],
+train_dataset = create_balanced_sample(train_dataset, 40)
+train_dataset = train_dataset.map(
+    lambda example: {'input_ids': normalize(example['input_ids'])},
     new_fingerprint='transformed_mnist'
 )
-test_dataset.set_format(type='torch', columns=['pixel_values', 'label'])
+train_dataset = train_dataset.rename_column('pixel_values', 'input_ids')
+
+test_dataset = test_dataset.map(
+    lambda example: {'input_ids': normalize(example['input_ids'])},
+    new_fingerprint='transformed_mnist'
+)
+test_dataset = test_dataset.rename_column('pixel_values', 'input_ids')
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True) # type: ignore
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True) # type: ignore
@@ -138,7 +176,7 @@ config = ViTConfig(
     num_channels=1,
     num_labels=10,
     num_hidden_layers=4,
-    hidden_size=256,
+    hidden_size=512,
     num_attention_heads=4,
     intermediate_size=4096,
 )
@@ -159,8 +197,8 @@ for epoch in range(num_epochs):
     train_correct = 0
     train_total = 0
 
-    for batch_idx, (data, target) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")):
-        data, target = data.to(device), target.to(device)
+    for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")):
+        data, target = batch['input_ids'].to(device), batch['label'].to(device)
         optimizer.zero_grad()
         outputs = model(data).logits
         loss = criterion(outputs, target)
@@ -195,12 +233,13 @@ for epoch in range(num_epochs):
             SaeConfig(multi_topk=True),
             batch_size=16,
             run_name=str(run_name),
-            log_to_wandb=True,
-            layers=[0, 1, 2, 3],
-            dummy_inputs={'pixel_values': torch.randn(3, 1, 32, 32)},
+            log_to_wandb=False,
+            layers=[0, 1, 2, 3]
         )
 
-        trainer = SaeTrainer(cfg, train_dataset, model)
+        dummy_inputs={'pixel_values': torch.randn(3, 1, 32, 32)}
+
+        trainer = SaeTrainer(cfg, train_dataset, model, dummy_inputs)
         trainer.fit()
 
     model.eval()
@@ -209,8 +248,8 @@ for epoch in range(num_epochs):
     test_total = 0
 
     with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
+        for batch in test_loader:
+            data, target = batch['input_ids'].to(device), batch['label'].to(device)
             outputs = model(data).logits
             loss = criterion(outputs, target)
 

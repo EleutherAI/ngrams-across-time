@@ -1,8 +1,7 @@
 from dataclasses import dataclass
 
-import numpy as np
 from tqdm import tqdm
-from datasets import ClassLabel, Dataset, DatasetDict, Features, Image, load_dataset
+from datasets import ClassLabel, DatasetDict, Features, Image, load_dataset # Dataset
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -10,9 +9,8 @@ from torch import Tensor
 from concept_erasure import QuadraticEraser
 from concept_erasure.utils import assert_type
 from torch.utils.data import DataLoader, Dataset
-import torchvision
 import torchvision.transforms.v2.functional as TF
-from torchvision import transforms
+from argparse import ArgumentParser
 
 from ngrams_across_time.utils.utils import set_seeds
 
@@ -39,26 +37,6 @@ def infer_columns(feats: Features) -> tuple[str, str]:
     return img_cols[0], label_cols[0]
 
 
-@dataclass
-class ErasedDataset(Dataset):
-    eraser: QuadraticEraser
-    X: Tensor
-    Y: Tensor
-
-    def __getitem__(self, idx: int) -> dict[str, Tensor]:
-        x, y = self.X[idx], int(self.Y[idx])
-        x_erased = self.eraser.optimal_transport(y, x.unsqueeze(0)).squeeze(0)
-        x = x_erased.reshape(x.shape)
-        
-        return {
-            "pixel_values": x,
-            "label": torch.tensor(y),
-        }
-
-    def __len__(self) -> int:
-        return len(self.Y)
-
-
 class MLP(nn.Module):
     def __init__(self, input_size, num_classes):
         super(MLP, self).__init__()
@@ -74,7 +52,7 @@ class MLP(nn.Module):
         return out
 
 
-class EditedDataset(Dataset):
+class HfDataset(Dataset):
     def __init__(self, data, labels):
         self.data = data
         self.labels = labels
@@ -89,14 +67,14 @@ class EditedDataset(Dataset):
         }   
 
 
-def run_dataset(dataset_str: str, seed: int):
+def run_dataset(dataset_str: str, seed: int, edited: bool):
     images = None
     labels = None
-    edited = False
+    
     if edited:
         def load_edited_dataset(filename):
             loaded_data = torch.load(filename)
-            return EditedDataset(loaded_data['data'], loaded_data['labels'])
+            return HfDataset(loaded_data['data'], loaded_data['labels'])
         train_dataset = load_edited_dataset('edited_train_dataset.pth')
         test_dataset = load_edited_dataset('edited_test_dataset.pth')
         
@@ -124,8 +102,6 @@ def run_dataset(dataset_str: str, seed: int):
         test_images = TF.normalize(test_images, mean.tolist(), std.tolist())
 
 
-    # torchvision.datasets.CIFAR10(root='.', train=True, download=True)
-    # torchvision.datasets.CIFAR10(root='.', train=False, download=True)
     # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     # test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
@@ -170,9 +146,46 @@ def run_dataset(dataset_str: str, seed: int):
     }, f'mlp_cifar10_{"edited" if edited else "not_edited"}.pth')
 
 
-# ConceptEditedDataset produces data on the fly so we loop over Concept Edited Dataset for training and testing and save with torch.save
-# Save the edited datasets
+# Build second order concept edited dataset
 def build_dataset(dataset_str: str):
+    @dataclass
+    class ErasedDataset(Dataset):
+        eraser: QuadraticEraser
+        X: Tensor
+        Y: Tensor
+
+        def __getitem__(self, idx: int) -> dict[str, Tensor]:
+            x, y = self.X[idx], int(self.Y[idx])
+            x = self.eraser.optimal_transport(y, x.unsqueeze(0)).squeeze(0)
+            
+            return {
+                "pixel_values": x,
+                "label": torch.tensor(y),
+            }
+
+        def __len__(self) -> int:
+            return len(self.Y)
+
+    def save_edited_dataset(dataset, filename, batch_size=256):
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        
+        all_data = []
+        all_labels = []
+        
+        for batch in tqdm(dataloader, desc=f"Processing {filename}"):
+            all_data.append(batch['pixel_values'])
+            all_labels.append(batch['label'])
+        
+        edited_data = torch.cat(all_data)
+        edited_labels = torch.cat(all_labels)
+        
+        torch.save({
+            'data': edited_data,
+            'labels': edited_labels
+        }, filename)
+        
+        print(f"Saved edited dataset to {filename}")
+
     # Allow specifying load_dataset("svhn", "cropped_digits") as "svhn:cropped_digits"
     # We don't use the slash because it's a valid character in a dataset name
     path, _, name = dataset_str.partition(":")
@@ -204,29 +217,20 @@ def build_dataset(dataset_str: str):
     edited_ds_train = ErasedDataset(eraser, X_train, Y_train)
     edited_ds_test = ErasedDataset(eraser, X_test, Y_test)
 
-    def save_edited_dataset(dataset, filename, batch_size=256):
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-        
-        all_data = []
-        all_labels = []
-        
-        for batch in tqdm(dataloader, desc=f"Processing {filename}"):
-            all_data.append(batch['pixel_values'])
-            all_labels.append(batch['label'])
-        
-        edited_data = torch.cat(all_data)
-        edited_labels = torch.cat(all_labels)
-        
-        torch.save({
-            'data': edited_data,
-            'labels': edited_labels
-        }, filename)
-        
-        print(f"Saved edited dataset to {filename}")
-
     save_edited_dataset(edited_ds_train, 'edited_train_dataset.pth')
     save_edited_dataset(edited_ds_test, 'edited_test_dataset.pth')
 
+
+def parse_args():
+    parser = ArgumentParser()
+    parser.add_argument("--dataset", type=str, default="cifar10")
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--edited", action="store_true")
+
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    # build_dataset("cifar10")
-    run_dataset("cifar10", 1)
+    args = parse_args()
+    # build_dataset(args.dataset)
+    run_dataset(args.dataset, args.seed, args.edited)

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import numpy as np
 from tqdm import tqdm
 from datasets import ClassLabel, Dataset, DatasetDict, Features, Image, load_dataset
 import torch
@@ -9,10 +10,23 @@ from torch import Tensor
 from concept_erasure import QuadraticEraser
 from concept_erasure.utils import assert_type
 from torch.utils.data import DataLoader, Dataset
+import torchvision
+import torchvision.transforms.v2.functional as TF
+from torchvision import transforms
 
 from ngrams_across_time.utils.utils import set_seeds
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def get_mean_std(X):
+    channels_mean = torch.mean(X, dim=[0,2,3])
+    channels_squared_sum = torch.mean(X**2, dim=[0,2,3])
+
+    std = (channels_squared_sum - channels_mean ** 2) ** 0.5
+    
+    return channels_mean, std
+
 
 def infer_columns(feats: Features) -> tuple[str, str]:
     # Infer the appropriate columns by their types
@@ -23,6 +37,7 @@ def infer_columns(feats: Features) -> tuple[str, str]:
     assert len(label_cols) == 1, f"Found {len(label_cols)} label columns"
 
     return img_cols[0], label_cols[0]
+
 
 @dataclass
 class ErasedDataset(Dataset):
@@ -44,13 +59,12 @@ class ErasedDataset(Dataset):
         return len(self.Y)
 
 
-
 class MLP(nn.Module):
     def __init__(self, input_size, num_classes):
         super(MLP, self).__init__()
-        self.fc1 = nn.Linear(input_size, input_size * 8)
+        self.fc1 = nn.Linear(input_size, input_size * 4) # input_size * 8 # 4x?
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(input_size * 8, num_classes)
+        self.fc2 = nn.Linear(input_size * 4, num_classes)
     
     def forward(self, x):
         x = x.view(x.size(0), -1)  # Flatten the input
@@ -58,6 +72,7 @@ class MLP(nn.Module):
         x = self.relu(x)
         out = self.fc2(x)
         return out
+
 
 class EditedDataset(Dataset):
     def __init__(self, data, labels):
@@ -73,53 +88,63 @@ class EditedDataset(Dataset):
             'label': self.labels[idx]
         }   
 
-def run_dataset(dataset_str: str, seed: int):
-    def load_edited_dataset(filename):
-        loaded_data = torch.load(filename)
-        return EditedDataset(loaded_data['data'], loaded_data['labels'])
 
-    edited_ds_train = load_edited_dataset('edited_train_dataset.pth')
-    edited_ds_test = load_edited_dataset('edited_test_dataset.pth')
+def run_dataset(dataset_str: str, seed: int):
+    images = None
+    labels = None
+    edited = False
+    if edited:
+        def load_edited_dataset(filename):
+            loaded_data = torch.load(filename)
+            return EditedDataset(loaded_data['data'], loaded_data['labels'])
+        train_dataset = load_edited_dataset('edited_train_dataset.pth')
+        test_dataset = load_edited_dataset('edited_test_dataset.pth')
+        
+        images = train_dataset.data.to(device)
+        labels = train_dataset.labels.to(device)
+        
+        test_images = test_dataset.data.to(device)
+        test_labels = test_dataset.labels.to(device)
+    else:
+        path, _, name = dataset_str.partition(":")
+        ds: DatasetDict = load_dataset(path, name or None) # type: ignore
+        train_dataset = ds['train'].with_format("torch")
+        test_dataset = ds['test'].with_format("torch")
+
+        images =  assert_type(Tensor, train_dataset['img']).div(255).to(device)
+        labels = assert_type(Tensor, train_dataset['label']).to(device)
+
+        test_images = assert_type(Tensor, test_dataset['img']).div(255).to(device)
+        test_labels = assert_type(Tensor, test_dataset['label']).to(device)
+
+        # normalize images to mean and std of 0.5
+        mean, std = get_mean_std(images)
+        images = TF.normalize(images, mean.tolist(), std.tolist())
+        mean, std = get_mean_std(test_images)
+        test_images = TF.normalize(test_images, mean.tolist(), std.tolist())
+
+
+    # torchvision.datasets.CIFAR10(root='.', train=True, download=True)
+    # torchvision.datasets.CIFAR10(root='.', train=False, download=True)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    # test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     num_epochs = 20_000
     learning_rate = 1e-3
 
     set_seeds(seed)
 
-    # Allow specifying load_dataset("svhn", "cropped_digits") as "svhn:cropped_digits"
-    # We don't use the slash because it's a valid character in a dataset name
-    path, _, name = dataset_str.partition(":")
-    ds = load_dataset(path, name or None)
-    assert isinstance(ds, DatasetDict)
-
-    # Infer columns and class labels
-    img_col, label_col = infer_columns(ds["train"].features)
-    labels = ds["train"].features[label_col].names
-    print(f"Classes in '{dataset_str}': {labels}")
-
-    # CIFAR-10 dataset
-    # train_dataset = torchvision.datasets.CIFAR10(root='.', train=True, download=True) # transform=transform
-    # test_dataset = torchvision.datasets.CIFAR10(root='.', train=False, download=True) # transform=transform
-    # train_loader = DataLoader(train_dataset, batch_size=len(edited_ds_train) // 4, shuffle=True)
-    # test_loader = DataLoader(test_dataset, batch_size=len(edited_ds_test) // 4, shuffle=False)
-
-    train_loader = DataLoader(edited_ds_train, batch_size=len(edited_ds_train), shuffle=True)
-    test_loader = DataLoader(edited_ds_test, batch_size=len(edited_ds_test), shuffle=False)
-
     # Train the model
     input_size = 32 * 32 * 3  # CIFAR-10 images are 32x32 pixels with 3 color channels
     num_classes = 10
     model = MLP(input_size, num_classes).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    images = edited_ds_train.data.to(device)
-    labels = edited_ds_train.labels.to(device)
 
     for epoch in tqdm(range(num_epochs)):
         outputs = model(images)
-        loss = criterion(outputs, labels)
+        loss = loss_fn(outputs, labels)
         
         optimizer.zero_grad()
         loss.backward()
@@ -127,19 +152,22 @@ def run_dataset(dataset_str: str, seed: int):
             
         if (epoch + 1) % 10 == 0:
             print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}')
-            # model.eval()
             with torch.no_grad():
-                test_images = edited_ds_test.data.to(device)
-                test_labels = edited_ds_test.labels.to(device)
                 outputs = model(test_images)
                 _, predicted = torch.max(outputs.data, 1)
                 total = test_labels.size(0)
                 correct = (predicted == test_labels).sum().item()
 
             print(f'Accuracy of the model on the 10000 test images: {100 * correct / total}%')
+            print(f'Loss of the model on the 10000 test images: {loss_fn(outputs, test_labels).item()}')
 
     # Save the model
-    torch.save(model.state_dict(), 'mlp_cifar10.pth')
+    torch.save({
+        'edited': edited,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'epoch': num_epochs,
+    }, f'mlp_cifar10_{"edited" if edited else "not_edited"}.pth')
 
 
 # ConceptEditedDataset produces data on the fly so we loop over Concept Edited Dataset for training and testing and save with torch.save

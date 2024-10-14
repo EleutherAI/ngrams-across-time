@@ -40,9 +40,9 @@ def infer_columns(feats: Features) -> tuple[str, str]:
 class MLP(nn.Module):
     def __init__(self, input_size, num_classes):
         super(MLP, self).__init__()
-        self.fc1 = nn.Linear(input_size, input_size * 4) # input_size * 8 # 4x?
+        self.fc1 = nn.Linear(input_size, 128)
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(input_size * 4, num_classes)
+        self.fc2 = nn.Linear(128, num_classes)
     
     def forward(self, x):
         x = x.view(x.size(0), -1)  # Flatten the input

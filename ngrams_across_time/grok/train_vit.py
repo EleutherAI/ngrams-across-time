@@ -44,56 +44,6 @@ def create_balanced_sample(dataset: HfDataset, n):
     balanced_dataset.set_format(type='torch', columns=['input_ids', 'label'])
     return balanced_dataset
 
-# def create_balanced_sample(dataset: HfDataset, n):
-#     dataset.set_format(type=None, columns=['input_ids', 'label'])
-#     num_classes = len(set(dataset['label']))
-#     samples_per_class = n // num_classes
-
-#     class_indices = {i: [] for i in range(num_classes)}
-#     for idx, label in enumerate(dataset['label']):
-#         class_indices[label].append(idx)
-    
-#     # Randomly select samples_per_class indices from each class
-#     balanced_indices = []
-#     for class_idx in class_indices:
-#         if len(class_indices[class_idx]) >= samples_per_class:
-#             balanced_indices.extend(random.sample(class_indices[class_idx], samples_per_class))
-#         else:
-#             # If a class has fewer samples than required, take all available and randomly oversample
-#             balanced_indices.extend(class_indices[class_idx])
-#             balanced_indices.extend(random.choices(class_indices[class_idx], 
-#                                                    k=samples_per_class - len(class_indices[class_idx])))
-
-
-#     balanced_dataset = HfDataset.from_dict({
-#         'input_ids': [dataset['input_ids'][i] for i in balanced_indices],
-#         'label': [dataset['label'][i] for i in balanced_indices]
-#     })
-#     balanced_dataset.set_format(type='torch', columns=['input_ids', 'label'])
-#     return balanced_dataset
-    
-
-def mean_std(dataset: HfDataset, batch_size=1000, num_workers=4, num_channels=1):
-    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers) # type: ignore
-
-    mean = torch.zeros(num_channels)
-    std = torch.zeros(num_channels)
-    total_samples = 0
-
-    for batch in loader:
-        images = batch[0] if isinstance(batch, (tuple, list)) else batch
-        batch_samples = images.size(0)
-        images = images.view(batch_samples, images.size(1), -1)
-        
-        mean += images.mean(2).sum(0)
-        std += images.std(2).sum(0)
-        total_samples += batch_samples
-
-    mean /= total_samples
-    std /= total_samples
-
-    return mean, std
-
 
 def parse_args():
     parser = ArgumentParser(description="Train Vision Transformer on MNIST")
@@ -191,6 +141,11 @@ run_identifier = f"mnist_seed_{args.seed}{'_' + args.run_name if args.run_name e
 checkpoints_path = Path("vit_ckpts") / run_identifier
 checkpoints_path.mkdir(exist_ok=True)
 
+checkpoints = []
+checkpoint_epochs = []
+test_losses = []
+train_losses = []
+
 for epoch in range(num_epochs):
     model.train()
     train_loss = 0.0
@@ -242,23 +197,41 @@ for epoch in range(num_epochs):
         trainer = SaeTrainer(cfg, train_dataset, model, dummy_inputs)
         trainer.fit()
 
-    model.eval()
-    test_loss = 0.0
-    test_correct = 0
-    test_total = 0
+        model.eval()
+        test_loss = 0.0
+        test_correct = 0
+        test_total = 0
 
-    with torch.no_grad():
-        for batch in test_loader:
-            data, target = batch['input_ids'].to(device), batch['label'].to(device)
-            outputs = model(data).logits
-            loss = criterion(outputs, target)
+        with torch.no_grad():
+            for batch in test_loader:
+                data, target = batch['input_ids'].to(device), batch['label'].to(device)
+                outputs = model(data).logits
+                loss = criterion(outputs, target)
 
-            test_loss += loss.item()
-            _, predicted = outputs.max(1)
-            test_total += target.size(0)
-            test_correct += predicted.eq(target).sum().item()
+                test_loss += loss.item()
+                _, predicted = outputs.max(1)
+                test_total += target.size(0)
+                test_correct += predicted.eq(target).sum().item()
 
-    test_accuracy = 100.0 * test_correct / test_total
-    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%")
+        test_accuracy = 100.0 * test_correct / test_total
+        print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%")
+
+        checkpoints.append(model.state_dict())
+        checkpoint_epochs.append(epoch)
+        train_losses.append(train_loss)
+        test_losses.append(test_loss)
 
 print("Training completed!")
+
+torch.save(
+{
+    "model": model.state_dict(),
+    "dataset": train_dataset,
+    "config": config,
+    "run_identifier": run_identifier,
+    "checkpoints": checkpoints,
+    "checkpoint_epochs": checkpoint_epochs,
+    "test_losses": test_losses,
+    "train_losses": train_losses,
+},
+checkpoints_path / "final.pth")

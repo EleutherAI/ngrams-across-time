@@ -208,11 +208,16 @@ def build_dataset(dataset_str: str):
     train = ds["train"].with_format("torch")
     X_train: Tensor = assert_type(Tensor, train[img_col]).div(255)
     Y_train = assert_type(Tensor, train[label_col])
+    # X_train = X_train.to(torch.float64)
+
 
     test = ds["test"].with_format("torch")
     X_test: Tensor = assert_type(Tensor, test[img_col]).div(255)
+    # X_test = X_test.to(torch.float64)
     Y_test = assert_type(Tensor, test[label_col])
 
+    # print(X_train.dtype)
+    # breakpoint()
     eraser = QuadraticEraser.fit(X_train.flatten(1, 3), Y_train)
     edited_ds_train = ErasedDataset(eraser, X_train, Y_train)
     edited_ds_test = ErasedDataset(eraser, X_test, Y_test)
@@ -232,5 +237,5 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    # build_dataset(args.dataset)
+    build_dataset(args.dataset)
     run_dataset(args.dataset, args.seed, args.edited)

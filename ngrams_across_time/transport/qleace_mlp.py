@@ -10,7 +10,7 @@ import torchvision as tv
 from concept_erasure import LeaceFitter, OracleFitter, QuadraticFitter, LeaceEraser
 from pytorch_lightning.loggers import WandbLogger
 from torch import Tensor, nn
-from torch.utils.data import Dataset, random_split, Subset
+from torch.utils.data import Dataset, random_split
 from torchvision.datasets import CIFAR10
 from tqdm.auto import tqdm
 
@@ -182,9 +182,13 @@ class LeacedDataset(Dataset):
         # Erase BEFORE transforming
         if isinstance(self.eraser, LeaceEraser):
             x_erased = self.eraser(x.flatten())
+            x = x_erased.reshape(x.shape)
         else:
-            x_erased = self.eraser(x.flatten(), torch.tensor(z).type_as(x).to(torch.int64))
-        return self.transform(x_erased.view(x.shape)), z 
+            z_tensor = torch.tensor(data=z).type_as(x).to(torch.int64)
+            if z_tensor.ndim == 0:
+                z_tensor = z_tensor.unsqueeze(0)
+            x = self.eraser(x.unsqueeze(0), z_tensor)
+        return self.transform(x), z
 
     def __len__(self):
         return len(self.dataset)
@@ -228,7 +232,7 @@ if __name__ == "__main__":
         }[args.eraser]
 
         fitter = cls(3 * 32 * 32, k, dtype=torch.float32, device=device)
-        # train_subset = Subset(train, range(20_000))
+        # train_subset = Subset(train, range(500))
         for x, y in tqdm(train):
             y = torch.as_tensor(y).view(1)
             if args.eraser != "qleace":

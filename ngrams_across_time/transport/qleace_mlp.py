@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 from itertools import pairwise
+from turtle import xcor
 from typing import Callable, Sized
 
 import math
@@ -205,12 +206,19 @@ class LeacedDataset(Dataset):
         # Erase BEFORE transforming
         if isinstance(self.eraser, LeaceEraser):
             x_erased = self.eraser(x.flatten())
+            x = x_erased.reshape(x.shape)
         else:
             z_tensor = torch.tensor(data=z)
             if z_tensor.ndim == 0:
                 z_tensor = z_tensor.unsqueeze(0)
-            x_erased = self.eraser(x.unsqueeze(0), z_tensor)
-        return self.transform(x_erased), z
+            x = self.eraser(x.unsqueeze(0), z_tensor)
+        return self.transform(x), z
+
+        #             z_tensor = torch.tensor(data=z).type_as(x).to(torch.int64)
+        #     if z_tensor.ndim == 0:
+        #         z_tensor = z_tensor.unsqueeze(0)
+        #     x = self.eraser(x.unsqueeze(0), z_tensor)
+        # return self.transform(x), z
 
     def __len__(self):
         return len(self.dataset)
@@ -255,7 +263,6 @@ if __name__ == "__main__":
         }[args.eraser]
 
         fitter = cls(3 * 32 * 32, k, dtype=torch.float64, device=device, shrinkage=False)
-
         if args.debug:
             train = Subset(train, range(100))
             eraser = QuadraticEraser(

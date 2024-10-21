@@ -2,20 +2,43 @@ from argparse import ArgumentParser
 from itertools import pairwise
 from typing import Callable, Sized
 
+import math
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 import torchmetrics as tm
 import torchvision as tv
-from concept_erasure import LeaceFitter, OracleFitter, QuadraticFitter, LeaceEraser
+from concept_erasure import LeaceFitter, OracleFitter, QuadraticFitter, LeaceEraser, QuadraticEraser
 from pytorch_lightning.loggers import WandbLogger
+from torch.utils.data import Subset
 from torch import Tensor, nn
-from torch.utils.data import Dataset, random_split, Subset
+from torch.utils.data import Dataset, random_split
 from torchvision.datasets import CIFAR10
 from tqdm.auto import tqdm
+from pytorch_lightning.callbacks import Callback
 
-torch.set_float32_matmul_precision('high')
 
+class Log2CheckpointCallback(Callback):
+    def __init__(self, filepath):
+        super().__init__()
+        self.filepath = filepath
+        self.last_saved_step = 0
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        global_step = trainer.global_step
+        if global_step == 0:
+            return
+
+        if self.is_power_of_two(global_step) and global_step > self.last_saved_step:
+            filename: str = f"{self.filepath}/step={global_step:07d}.ckpt"
+            trainer.save_checkpoint(filename)
+            self.last_saved_step = global_step
+
+    @staticmethod
+    def is_power_of_two(n):
+        return (n & (n-1) == 0) and n != 0
+
+torch.set_default_tensor_type(torch.DoubleTensor)
 
 class Mlp(pl.LightningModule):
     def __init__(self, k, h=128):
@@ -183,8 +206,11 @@ class LeacedDataset(Dataset):
         if isinstance(self.eraser, LeaceEraser):
             x_erased = self.eraser(x.flatten())
         else:
-            x_erased = self.eraser(x.flatten(), torch.tensor(z).type_as(x).to(torch.int64))
-        return self.transform(x_erased.view(x.shape)), z 
+            z_tensor = torch.tensor(data=z)
+            if z_tensor.ndim == 0:
+                z_tensor = z_tensor.unsqueeze(0)
+            x_erased = self.eraser(x.unsqueeze(0), z_tensor)
+        return self.transform(x_erased), z
 
     def __len__(self):
         return len(self.dataset)
@@ -195,11 +221,12 @@ if __name__ == "__main__":
     parser.add_argument("name", type=str)
     parser.add_argument("--eraser", type=str, choices=("none", "leace", "oleace", "qleace"))
     parser.add_argument("--net", type=str, choices=("mlp", "resmlp", "resnet"))
+    parser.add_argument("--width", type=int, default=128)
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # if args.eraser == "qleace":
-    #     device = torch.device("cpu")
+    
     # Split the "train" set into train and validation
     nontest = CIFAR10(
         "/home/lucia/cifar10", download=True, transform=tv.transforms.ToTensor()
@@ -216,8 +243,8 @@ if __name__ == "__main__":
     k = 10  # Number of classes
     final = nn.Identity() if args.net == "resnet" else nn.Flatten(0)
     train_trf = tv.transforms.Compose([
-        tv.transforms.RandomHorizontalFlip(),
-        tv.transforms.RandomCrop(32, padding=4),
+        # tv.transforms.RandomHorizontalFlip(), # Increases norm of class covariance diff
+        # tv.transforms.RandomCrop(32, padding=4),
         final,
     ])
     if args.eraser != "none":
@@ -227,16 +254,24 @@ if __name__ == "__main__":
             "qleace": QuadraticFitter,
         }[args.eraser]
 
-        fitter = cls(3 * 32 * 32, k, dtype=torch.float32, device=device)
-        # train_subset = Subset(train, range(20_000))
-        for x, y in tqdm(train):
-            y = torch.as_tensor(y).view(1)
-            if args.eraser != "qleace":
-                y = F.one_hot(y, k)
+        fitter = cls(3 * 32 * 32, k, dtype=torch.float64, device=device, shrinkage=False)
 
-            fitter.update(x.view(1, -1).to(device), y.to(device))
+        if args.debug:
+            train = Subset(train, range(100))
+            eraser = QuadraticEraser(
+                torch.zeros(3 * 32 * 32, dtype=torch.float64), 
+                global_mean=torch.zeros(3 * 32 * 32, dtype=torch.float64),
+                ot_maps=torch.zeros(10, 3 * 32 * 32, 3 * 32 * 32, dtype=torch.float64),
+            )
+        else:
+            for x, y in tqdm(train):
+                y = torch.as_tensor(y).view(1)
+                if args.eraser != "qleace":
+                    y = F.one_hot(y, k)
 
-        eraser = fitter.eraser.to("cpu")
+                fitter.update(x.view(1, -1).to(device), y.to(device))
+
+            eraser = fitter.eraser.to("cpu")
     else:
         eraser = lambda x, y: x
     train = LeacedDataset(train, eraser, transform=train_trf)
@@ -245,20 +280,22 @@ if __name__ == "__main__":
 
     # Create the data module
     dm = pl.LightningDataModule.from_datasets(train, val, test, batch_size=128, num_workers=8)
-
+    
     model_cls = {
         "mlp": Mlp,
         "resmlp": ResMlp,
         "resnet": ResNet,
     }[args.net]
-    model = model_cls(k)
+    model = model_cls(k, h=args.width)
 
     trainer = pl.Trainer(
         callbacks=[
             # EarlyStopping(monitor="val_loss", patience=5),
+            Log2CheckpointCallback(filepath=f'checkpoints-{args.width}')
         ],
-        logger=WandbLogger(name=args.name, project="mdl", entity="eleutherai"),
+        logger=WandbLogger(name=args.name, project="mdl", entity="eleutherai") if not args.debug else None,
         max_epochs=200,
+        precision=64
     )
     trainer.fit(model, dm)
     trainer.test(model, dm)

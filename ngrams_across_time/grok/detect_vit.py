@@ -147,6 +147,7 @@ def main():
     OUT_PATH = Path(f"vit_ckpts") / run_identifier / "inference.pth"
     OUT_PATH.parent.mkdir(exist_ok=True, parents=True)
 
+    breakpoint()
     model_checkpoints = cached_data["checkpoints"][::5]
     checkpoint_epochs = cached_data["checkpoint_epochs"][::5]
 

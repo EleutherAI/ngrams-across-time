@@ -19,6 +19,57 @@ import lovely_tensors as lt
 from ngrams_across_time.utils.utils import set_seeds, assert_type
 
 
+# Forgot to save this in pth
+def get_test_dataset():
+    train_dataset: HfDataset = load_dataset("mnist", split='train') # type: ignore
+
+    def map_fn(ex):
+        return {
+            'input_ids': transforms.ToTensor()(ex['image']),
+            'label': ex['label']
+        }
+
+    train_dataset = train_dataset.map(
+        function=map_fn,
+        remove_columns=['image'],
+        new_fingerprint='transformed_mnist', # type: ignore
+        keep_in_memory=True # type: ignore
+    )
+    train_dataset = train_dataset.with_format('torch')
+    train_dataset.set_format(type='torch', columns=['input_ids', 'label'])
+
+    print("Final columns:", train_dataset.column_names)
+
+    # Calculate mean and std of pixel values
+    input_ids = assert_type(Tensor, train_dataset['input_ids'])
+    mean = input_ids.mean().item()
+    std = input_ids.std().item()
+    def normalize(image):
+        transform = transforms.Compose([
+            transforms.Normalize((mean,), (std,))
+        ])
+        return transform(image)
+
+
+    test_dataset: HfDataset = load_dataset('mnist', split='test') # type: ignore
+
+    test_dataset = test_dataset.map(
+        function=map_fn,
+        remove_columns=['image'],
+        new_fingerprint='transformed_mnist', # type: ignore
+        keep_in_memory=True # type: ignore
+    )
+    test_dataset.set_format(type='torch', columns=['input_ids', 'label'])
+
+    test_dataset = test_dataset.map(
+        lambda example: {'input_ids': normalize(example['input_ids'])},
+        new_fingerprint='transformed_mnist'
+    )
+
+    return test_dataset
+
+
+
 def create_balanced_sample(dataset: HfDataset, n):
     dataset.set_format(type='numpy', columns=['input_ids', 'label'])
     labels = dataset['label']
@@ -62,35 +113,33 @@ num_epochs = 100
 learning_rate = 1e-4
 checkpoint_interval = 5
 
-def to_tensor(image):
-    return Image.fromarray(image)
-
 train_dataset: HfDataset = load_dataset("mnist", split='train') # type: ignore
+
+def map_fn(ex):
+    return {
+        'input_ids': transforms.ToTensor()(ex['image']),
+        'label': ex['label']
+    }
+
 train_dataset = train_dataset.map(
-    function=lambda example: {
-        'input_ids': to_tensor(example['image']),
-        'label': example['label']
-    },
+    function=map_fn,
+    remove_columns=['image'],
     new_fingerprint='transformed_mnist', # type: ignore
     keep_in_memory=True # type: ignore
 )
 train_dataset = train_dataset.with_format('torch')
-
-# Set format
-train_dataset = train_dataset.rename_column('pixel_values', 'input_ids')
 train_dataset.set_format(type='torch', columns=['input_ids', 'label'])
+
 print("Final columns:", train_dataset.column_names)
 
 test_dataset: HfDataset = load_dataset('mnist', split='test') # type: ignore
+
 test_dataset = test_dataset.map(
-    function=lambda example: {
-        'input_ids': to_tensor(example['image']),
-        'label': example['label']
-    },
+    function=map_fn,
+    remove_columns=['image'],
     new_fingerprint='transformed_mnist', # type: ignore
     keep_in_memory=True # type: ignore
 )
-test_dataset = test_dataset.rename_column('pixel_values', 'input_ids')
 test_dataset.set_format(type='torch', columns=['input_ids', 'label'])
 
 # Calculate mean and std of pixel values
@@ -109,19 +158,17 @@ train_dataset = train_dataset.map(
     lambda example: {'input_ids': normalize(example['input_ids'])},
     new_fingerprint='transformed_mnist'
 )
-train_dataset = train_dataset.rename_column('pixel_values', 'input_ids')
 
 test_dataset = test_dataset.map(
     lambda example: {'input_ids': normalize(example['input_ids'])},
     new_fingerprint='transformed_mnist'
 )
-test_dataset = test_dataset.rename_column('pixel_values', 'input_ids')
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True) # type: ignore
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True) # type: ignore
 
 config = ViTConfig(
-    image_size=32,
+    image_size=28,
     patch_size=4,
     num_channels=1,
     num_labels=10,
@@ -170,33 +217,6 @@ for epoch in range(num_epochs):
 
     # Save checkpoint every 5 epochs
     if (epoch + 1) % checkpoint_interval == 0:
-        checkpoint_path = checkpoints_path / f"mnist_epoch_{epoch+1}.pth"
-        torch.save({
-            'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': train_loss,
-        }, checkpoint_path)
-        print(f"Checkpoint saved at {checkpoint_path}")
-
-        # Train an SAE
-        run_name = Path(f"sae/{run_identifier}/{epoch}")
-        if run_name.exists():
-            continue
-            
-        cfg = TrainConfig(
-            SaeConfig(multi_topk=True),
-            batch_size=16,
-            run_name=str(run_name),
-            log_to_wandb=False,
-            layers=[0, 1, 2, 3]
-        )
-
-        dummy_inputs={'pixel_values': torch.randn(3, 1, 32, 32)}
-
-        trainer = SaeTrainer(cfg, train_dataset, model, dummy_inputs)
-        trainer.fit()
-
         model.eval()
         test_loss = 0.0
         test_correct = 0
@@ -220,6 +240,36 @@ for epoch in range(num_epochs):
         checkpoint_epochs.append(epoch)
         train_losses.append(train_loss)
         test_losses.append(test_loss)
+
+        checkpoint_path = checkpoints_path / f"mnist_epoch_{epoch+1}.pth"
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': train_loss,
+            'test_loss': test_loss,
+        }, checkpoint_path)
+        print(f"Checkpoint saved at {checkpoint_path}")
+
+        # Train an SAE
+        run_name = Path(f"sae/vit/{run_identifier}/{epoch}")
+        if run_name.exists():
+            continue
+            
+        cfg = TrainConfig(
+            SaeConfig(multi_topk=True),
+            batch_size=16,
+            run_name=str(run_name),
+            log_to_wandb=False,
+            layers=[0, 1, 2, 3]
+        )
+
+        dummy_inputs={'pixel_values': torch.randn(3, 1, 28, 28)}
+
+        breakpoint()
+        trainer = SaeTrainer(cfg, train_dataset, model, dummy_inputs)
+        trainer.fit()
+        breakpoint()
 
 print("Training completed!")
 

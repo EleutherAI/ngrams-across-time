@@ -20,11 +20,12 @@ def patch_nodes(
         metric_fn,
         nodes,
         metric_kwargs=dict(),
+        dummy_input="_"
 ):
     num_latents = next(iter(dictionaries.values())).num_latents if dictionaries else None
     # first run through the fake inputs to figure out which hidden states are tuples
     is_tuple = {}
-    with model.scan("_"):
+    with model.scan(dummy_input):
         for submodule in submodules:
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
@@ -115,28 +116,28 @@ def patch_nodes(
             alpha_complement = None
             if dictionaries:
                 alpha_act = torch.zeros_like(clean_state.act)
-                alpha_res = None
-                alpha_resc = None 
+                alpha_res = None if clean_state.res is None else torch.zeros_like(clean_state.res)
+                alpha_resc = None if clean_state.res is not None else 0.
 
                 if submodule.path in nodes:
                     act_indices = [idx for score, idx in nodes[submodule.path]]
                     alpha_act[:, :, [idx for idx in act_indices if idx >= 0]] = 1.
 
-                    if clean_state.resc is not None:
-                        alpha_res = None
-                        if -1 in act_indices:
-                            alpha_resc = 1.
-                    else:
-                        alpha_resc = None
-                        alpha_res = torch.zeros_like(clean_state.res)
+                    if alpha_res is not None:
                         res_indices = [-idx - 1 for idx in act_indices if idx < 0]
                         alpha_res[:, :, res_indices] = 1.
+                    else:
+                        if -1 in act_indices:
+                            alpha_resc = 1.
                 
                 alpha = DenseAct(alpha_act, alpha_res, alpha_resc)
-                if clean_state.resc is not None:
-                    alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, torch.ones_like(alpha_res) - alpha_res)
-                else:
-                    alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, torch.ones_like(alpha_res) - alpha_res)
+
+                if alpha_resc is not None:
+                    resc = torch.ones_like(alpha_resc) - alpha_resc
+                    alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, resc=resc)
+                if alpha_res is not None:
+                    res = torch.ones_like(alpha_res) - alpha_res
+                    alpha_complement = DenseAct(torch.ones_like(alpha_act) - alpha_act, res=res)
             else:
                 alpha = torch.zeros_like(clean_state)
                 if submodule.path in nodes:

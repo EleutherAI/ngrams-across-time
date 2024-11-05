@@ -225,3 +225,9 @@ prototype.py
 *.csv
 *.pkl
 test_image/
+sae/
+lightning_logs/
+MNIST/
+mdl/
+images/
+checkpoints-128/

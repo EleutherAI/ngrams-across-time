@@ -25,12 +25,13 @@ def _e_grad(
         dictionaries: dict[Any, Sae],
         metric_fn,
         metric_kwargs=dict(),
+        dummy_input: Any = "_"
 ):
     num_latents = next(iter(dictionaries.values())).num_latents if dictionaries else None
     
     # Figure out which hidden states are tuples using a test input
     is_tuple = {}
-    with model.scan("_"):
+    with model.scan(dummy_input):
         for submodule in submodules:
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
@@ -83,12 +84,13 @@ def _pe_attrib(
         dictionaries: dict[Any, Sae],
         metric_fn,
         metric_kwargs=dict(),
+        dummy_input: Any = "_"
 ):
     num_latents = next(iter(dictionaries.values())).num_latents if dictionaries else None
     
     # Figure out which hidden states are tuples using a test input
     is_tuple = {}
-    with model.scan("_"):
+    with model.scan(dummy_input):
         for submodule in submodules:
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
@@ -202,11 +204,12 @@ def _pe_ig(
         metric_fn,
         steps=10,
         metric_kwargs=dict(),
+        dummy_input: Any = "_"
 ):
     num_latents = next(iter(dictionaries.values())).num_latents if dictionaries else None
     # first run through the fake inputs to figure out which hidden states are tuples
     is_tuple = {}
-    with model.scan("_"):
+    with model.scan(dummy_input):
         for submodule in submodules:
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
@@ -352,11 +355,12 @@ def _pe_exact(
     submodules,
     dictionaries,
     metric_fn,
+    dummy_input: Any = "_"
     ):
     num_latents = next(iter(dictionaries.values())).num_latents
     # first run through a test input to figure out which hidden states are tuples
     is_tuple = {}
-    with model.scan("_"):
+    with model.scan(dummy_input):
         for submodule in submodules:
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
@@ -449,16 +453,17 @@ def patching_effect(
         metric_fn,
         method='attrib',
         steps=10,
-        metric_kwargs=dict()
+        metric_kwargs=dict(),
+        dummy_input: Any = "_",
 ):
     if method == 'attrib':
-        return _pe_attrib(clean, patch, model, submodules, dictionaries, metric_fn, metric_kwargs=metric_kwargs)
+        return _pe_attrib(clean, patch, model, submodules, dictionaries, metric_fn, metric_kwargs=metric_kwargs, dummy_input=dummy_input)
     elif method == 'ig':
-        return _pe_ig(clean, patch, model, submodules, dictionaries, metric_fn, steps=steps, metric_kwargs=metric_kwargs)
+        return _pe_ig(clean, patch, model, submodules, dictionaries, metric_fn, steps=steps, metric_kwargs=metric_kwargs, dummy_input=dummy_input)
     elif method == 'exact':
-        return _pe_exact(clean, patch, model, submodules, dictionaries, metric_fn)
+        return _pe_exact(clean, patch, model, submodules, dictionaries, metric_fn, dummy_input=dummy_input)
     elif method == 'grad':
-        return _e_grad(clean, model, submodules, dictionaries, metric_fn, metric_kwargs=metric_kwargs)
+        return _e_grad(clean, model, submodules, dictionaries, metric_fn, metric_kwargs=metric_kwargs, dummy_input=dummy_input)
     else:
         raise ValueError(f"Unknown method {method}")
 
@@ -472,6 +477,7 @@ def jvp(
         left_vec : Union[DenseAct, Dict[int, DenseAct]],
         right_vec : DenseAct,
         return_without_right = False,
+        dummy_input = "_"
 ):
     """
     Return a sparse shape [# downstream features + 1, # upstream features + 1] tensor of Jacobian-vector products.
@@ -484,7 +490,7 @@ def jvp(
 
     # first run through a test input to figure out which hidden states are tuples
     is_tuple = {}
-    with model.scan("_"):
+    with model.scan(dummy_input):
         is_tuple[upstream_submod] = type(upstream_submod.output.shape) == tuple
         is_tuple[downstream_submod] = type(downstream_submod.output.shape) == tuple
 

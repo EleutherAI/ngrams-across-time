@@ -7,7 +7,7 @@ from argparse import ArgumentParser
 import random
 from pathlib import Path
 
-from scipy import stats
+from scipy import stats, signal
 import torch.nn.functional as F
 import torch
 import numpy as np
@@ -20,10 +20,9 @@ from datasets import Dataset as HfDataset
 import plotly.graph_objects as go
 import lovely_tensors as lt
 
-from ngrams_across_time.feature_circuits.circuit import get_circuit, get_residual_node_scores
+from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy, get_transformer_resid_node_scores, get_circuit
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.feature_circuits.patch_nodes import patch_nodes
-from ngrams_across_time.feature_circuits.sae_loss import sae_loss
 from ngrams_across_time.grok.transformers import CustomTransformer, TransformerConfig
 
 
@@ -123,6 +122,63 @@ def abs_score_entropy(nodes):
     probs = np.array([score / sum_scores for score in scores])
     return stats.entropy(probs)
 
+def gini(vec):
+    sorted_vec = np.sort(vec)
+    cumsum = np.cumsum(sorted_vec)
+    return 1 - 2 * np.sum((cumsum - sorted_vec/2) / cumsum[-1]) / len(vec)
+
+def hoyer(vec):
+    return np.linalg.norm(vec, 1) / np.linalg.norm(vec, 2)
+
+
+def hoyer_square(vec):
+    vec_squared = np.array(vec) ** 2
+    return np.linalg.norm(vec_squared, 1) / np.linalg.norm(vec_squared, 2)
+
+
+def spectral_entropy(signal_data, sf, nperseg=None, normalize=True):
+    """
+    Calculate spectral entropy of a time series signal.
+    
+    Parameters:
+    -----------
+    signal_data : array-like
+        Input signal - time series data
+    sf : float
+        Sampling frequency of the signal
+    nperseg : int, optional
+        Length of each segment for Welch's method
+        If None, defaults to sf*2 (2 second windows)
+    normalize : bool, optional
+        If True, entropy is normalized by log2(n_freq_bins)
+    
+    Returns:
+    --------
+    float
+        Spectral entropy value
+    dict
+        Additional information including PSD and frequencies
+    """
+    # Input validation
+    signal_data = np.array(signal_data)
+    if signal_data.size == 0:
+        raise ValueError("Input signal is empty")
+    
+    # Set default nperseg if not specified
+    if nperseg is None:
+        nperseg = int(sf * 2)
+    
+    frequencies, psd = signal.welch(signal_data, sf, nperseg=nperseg)
+    
+    psd_norm = psd / psd.sum()
+    
+    spec_ent = -np.sum(psd_norm * np.log2(psd_norm + np.finfo(float).eps))
+    
+    if normalize:
+        spec_ent /= np.log2(len(psd_norm))
+    
+    return spec_ent
+
 
 def min_nodes_to_random(node_scores, node_type, train_data, patch_data, language_model, all_submods, metric_fn, dictionaries):
     random_loss = -math.log(1/113)
@@ -147,12 +203,11 @@ def min_nodes_to_random(node_scores, node_type, train_data, patch_data, language
 
 def get_args():
     parser = ArgumentParser()
-    parser.add_argument("--nodes", action="store_true")
-    parser.add_argument("--circuit_size", action="store_true")
-    parser.add_argument("--residual", action="store_true")
+    parser.add_argument("--inference", action="store_true")
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--model_seed", type=int, default=999, help="Model seed to load checkpoints for")
+    parser.add_argument("--model_seed", type=int, default=1, help="Model seed to load checkpoints for")
     parser.add_argument("--run_name", type=str, default='')
+    parser.add_argument("--sae_name", type=str, default='')
     return parser.parse_args()
 
 
@@ -173,6 +228,10 @@ def main():
     model_checkpoints = cached_data["checkpoints"][::5]
     checkpoint_epochs = cached_data["checkpoint_epochs"][::5]
 
+    test_early_index = len(model_checkpoints)
+    model_checkpoints = model_checkpoints[:test_early_index]
+    checkpoint_epochs = checkpoint_epochs[:test_early_index]
+
     # Minimal set of checkpoints for model seed 1 to show non-monoticity
     # model_checkpoints 0, 2, 12, 17, 45
     # checkpoint_epochs 0, 2, 12, 17, 45
@@ -188,6 +247,7 @@ def main():
 
     train_data = dataset[train_indices]
     train_labels = labels[train_indices]
+    print(len(train_data), "train data items")
 
     test_data = dataset[test_indices]
     test_labels = labels[test_indices]
@@ -203,11 +263,11 @@ def main():
     # Create smaller patching dataset
     len_data = 4 if args.debug else 40
     train_data = train_data[:len_data]
-    train_data = train_data.cuda()
+    train_data = train_data.to(device)
     train_labels = train_labels[:len_data]
-    train_labels = train_labels.cuda()
+    train_labels = train_labels.to(device)
     patch_train_data, patch_train_labels = create_patch_train_data(train_data, p)
-    patch_train_data = patch_train_data.cuda()
+    patch_train_data = patch_train_data.to(device)
 
     def metric_fn(logits, repeat: int = 1):
         labels = train_labels.repeat(repeat)
@@ -222,30 +282,29 @@ def main():
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
     checkpoint_data = torch.load(OUT_PATH) if OUT_PATH.exists() else {}
-    if args.circuit_size or args.residual or args.nodes:
+    if args.inference:
         for epoch, state_dict in tqdm(list(zip(checkpoint_epochs, model_checkpoints))):
             model.load_state_dict(state_dict)
-            model.cuda() # type: ignore
+            model.to(device) # type: ignore
 
             if epoch not in checkpoint_data:
                 checkpoint_data[epoch] = {}
             checkpoint_data[epoch]['parameter_norm'] = torch.cat([parameters.flatten() for parameters in model.parameters()]).flatten().norm(p=2).item()
-            checkpoint_data[epoch]['train_loss'] = F.cross_entropy(model(train_data.cuda()).logits.to(torch.float64)[:, -1], train_labels.cuda()).mean().item()
-            checkpoint_data[epoch]['test_loss'] = F.cross_entropy(model(test_data.cuda()).logits.to(torch.float64)[:, -1], test_labels.cuda()).mean().item()
+            checkpoint_data[epoch]['train_loss'] = F.cross_entropy(model(train_data[:len_data].to(device)).logits.to(torch.float64)[:, -1], train_labels[:len_data].to(device)).mean().item()
+            checkpoint_data[epoch]['test_loss'] = F.cross_entropy(model(test_data[:len_data].to(device)).logits.to(torch.float64)[:, -1], test_labels[:len_data].to(device)).mean().item()
 
             language_model = LanguageModel(model, tokenizer=tokenizer)
 
-            sae_path = Path(f"sae/{run_identifier}/grok.{epoch}")
+            sae_path = Path(f"sae/{run_identifier}{'_' + args.sae_name if args.sae_name else ''}/grok.{epoch}")
             if not sae_path.exists():
                 cfg = TrainConfig(
-                    SaeConfig(multi_topk=True), 
+                    SaeConfig(multi_topk=True, expansion_factor=128, k=model.config.d_model), 
                     batch_size=64,
                     run_name=str(sae_path),
                     log_to_wandb=True,
                     hookpoints=[
                         "blocks.*.hook_resid_pre", # start of block
                         "blocks.*.hook_resid_mid", # after ln / attention
-                        "blocks.*.hook_resid_post", # after ln / mlp
                         "blocks.*.hook_mlp_out" # basically the same as resid_post but without the resid added
                     ],
                 )
@@ -255,7 +314,6 @@ def main():
             embed = language_model.blocks[(0)].hook_resid_pre
             attns = [block.hook_resid_mid for block in language_model.blocks]
             mlps = [block.hook_mlp_out for block in language_model.blocks]
-            resids = [block.hook_resid_post for block in language_model.blocks]
 
             dictionaries = {}
             dictionaries[embed] = Sae.load_from_disk(
@@ -271,49 +329,55 @@ def main():
                     os.path.join(sae_path, f'blocks.{i}.hook_mlp_out'),
                     device=device
                 )
-                dictionaries[resids[i]] = Sae.load_from_disk(
-                    os.path.join(sae_path, f'blocks.{i}.hook_resid_post'),
-                    device=device
-                )
-            all_submods = [embed] + [submod for layer_submods in zip(mlps, attns, resids) for submod in layer_submods]
+            all_submods = [embed] + [submod for layer_submods in zip(attns, mlps) for submod in layer_submods]
 
-            if args.residual:
-                loss_all_saes, mean_res_norm, mse = sae_loss(train_data, language_model, all_submods, dictionaries, metric_fn)
-                checkpoint_data[epoch]['sae_loss'] = loss_all_saes.mean().item()
-                checkpoint_data[epoch]['sae_mse'] = mse
-                checkpoint_data[epoch]['mean_res_norm'] = mean_res_norm
-            
-            if args.nodes:
-                for method in ["ig", "grad", "attrib"]:
-                    # Residual node scores with zero ablation
-                    nodes = get_residual_node_scores(train_data, None, 
-                                        language_model, embed, attns, mlps, 
-                                        resids, metric_fn, aggregation="sum", method=method)
-                    checkpoint_data[epoch][f'residual_{method}_zero'] = {'nodes': nodes}
+            nodes, fvu, multi_topk_fvu = get_mean_sae_entropy(
+                language_model, all_submods, dictionaries, 
+                train_data, aggregate=True, batch_size=64
+            )
+            mean_fvu = np.mean([v.item() for v in fvu.values()])
+            mean_multi_topk_fvu = np.mean([v.item() for v in multi_topk_fvu.values()])
 
-                    # SAE node scores with zero ablation
-                    nodes, _ = get_circuit(train_data, None, 
-                                            language_model, embed, attns, mlps, 
-                                            resids, dictionaries, metric_fn, aggregation="sum",
-                                            nodes_only=True, node_threshold=0.01, method=method)
-                    checkpoint_data[epoch][f'sae_{method}_zero'] = {'nodes': nodes}
+            checkpoint_data[epoch][f'sae_fvu'] = mean_fvu
+            checkpoint_data[epoch][f'sae_multi_topk_fvu'] = mean_multi_topk_fvu
+            checkpoint_data[epoch][f'sae_entropy_nodes'] = {'nodes': nodes}   
 
-                    # Gradient scores don't use an activation delta
-                    if method == "grad":
-                        continue
+            checkpoint_data[epoch][f'sae_entropy'] = abs_score_entropy(nodes)
 
-                    # Residual node scores with patch ablation
-                    nodes = get_residual_node_scores(train_data, patch_train_data, 
-                                        language_model, embed, attns, mlps, 
-                                        resids, metric_fn, aggregation="sum", method=method)
-                    checkpoint_data[epoch][f'residual_{method}_patch'] = {'nodes': nodes}
+            node_scores = all_node_scores(nodes)
+            checkpoint_data[epoch][f'hoyer'] = hoyer(node_scores)
+            checkpoint_data[epoch][f'hoyer_square'] = hoyer_square(node_scores)
+            checkpoint_data[epoch][f'gini'] = gini(node_scores)
 
-                    # SAE node scores with patch ablation
-                    nodes, _ = get_circuit(train_data, patch_train_data, 
-                                            language_model, embed, attns, mlps, 
-                                            resids, dictionaries, metric_fn, aggregation="sum",
-                                            nodes_only=True, node_threshold=0.01, method=method)
-                    checkpoint_data[epoch][f'sae_{method}_patch'] = {'nodes': nodes}                
+            for method in ["ig", "grad", "attrib"]:
+                # Residual node scores with zero ablation
+                nodes = get_transformer_resid_node_scores(train_data, None, 
+                                    language_model, embed, attns, mlps, 
+                                    resids, metric_fn, aggregation="sum", method=method)
+                checkpoint_data[epoch][f'residual_{method}_zero'] = {'nodes': nodes}
+
+                # SAE node scores with zero ablation
+                all_submods = [embed] + [submod for layer_submods in zip(attns, mlps, resids) for submod in layer_submods]
+                nodes = get_circuit(train_data, None, language_model, 
+                                            all_submods, dictionaries, metric_fn, aggregate=True, method=method)
+                checkpoint_data[epoch][f'sae_{method}_zero'] = {'nodes': nodes}
+
+                # Gradient scores don't use an activation delta
+                if method == "grad":
+                    continue
+
+                # Residual node scores with patch ablation
+                nodes = get_transformer_resid_node_scores(train_data, patch_train_data, 
+                                    language_model, embed, attns, mlps, 
+                                    resids, metric_fn, aggregation="sum", method=method)
+                checkpoint_data[epoch][f'residual_{method}_patch'] = {'nodes': nodes}
+
+                # SAE node scores with patch ablation
+                nodes = get_circuit(train_data, patch_train_data, 
+                                        language_model, all_submods, 
+                                        dictionaries, metric_fn, aggregate=True,
+                                        method=method)
+                checkpoint_data[epoch][f'sae_{method}_patch'] = {'nodes': nodes}                
 
             # A random classifier's accuracy is 1/113 = 0.0088, resulting in a loss of 4.7330
             random_loss = -math.log(1/113)
@@ -338,13 +402,15 @@ def main():
 
                 # Binary search for the number of nodes to ablate to reach random accuracy
                 node_type = 'residual' if 'residual' in node_score_type else 'sae'
-                if args.circuit_size:
-                    num_features = min_nodes_to_random(
-                        checkpoint_data[epoch][node_score_type]['nodes'], node_type, train_data, None,
-                        language_model, all_submods, metric_fn, dictionaries
-                    )
-                    checkpoint_data[epoch][node_score_type][f'circuit_feature_count'] = num_features
-                    # TODO lucia track residual score norm
+
+                num_features = min_nodes_to_random(
+                    checkpoint_data[epoch][node_score_type]['nodes'], node_type, train_data, None,
+                    language_model, all_submods, metric_fn, dictionaries
+                )
+                checkpoint_data[epoch][node_score_type][f'circuit_feature_count'] = num_features
+                # TODO lucia track residual score norm
+
+
 
         torch.save(checkpoint_data, OUT_PATH)
         
@@ -363,15 +429,16 @@ def main():
         
 
         scores = (
-            [scores[score_type][key] for scores in checkpoint_data.values()]
+            [scores[score_type][key] for scores in list(checkpoint_data.values())[:test_early_index]]
             if score_type
-            else [scores[key] for scores in checkpoint_data.values()]
+            else [scores[key] for scores in list(checkpoint_data.values())[:test_early_index]]
         )
 
         if normalize:
             # Normalize scores to be between 0 and 1
             max_score = max(scores)
-            scores = [score / max_score for score in scores]
+            min_score = min(scores)
+            scores = [(score - min_score) / (max_score - min_score) for score in scores]
         fig.add_trace(go.Scatter(x=checkpoint_epochs, y=scores, mode='lines', name=name))
             
 
@@ -384,6 +451,14 @@ def main():
         add_scores_if_exists(fig, 'train_loss', None, 'Train loss')
         add_scores_if_exists(fig, 'test_loss', None, 'Test loss')
         add_scores_if_exists(fig, 'parameter_norm', None, 'Parameter norm')
+        # Sparsity metrics
+        add_scores_if_exists(fig, 'sae_entropy', None, 'SAE Entropy', normalize=False) # 
+        add_scores_if_exists(fig, 'hoyer', None, 'Hoyer', normalize=False)
+        add_scores_if_exists(fig, 'hoyer_square', None, 'Hoyer Square', normalize=False)
+        add_scores_if_exists(fig, 'gini', None, 'Gini coefficient', normalize=False)
+        # SAE fraction of variance unexplained metrics
+        add_scores_if_exists(fig, 'sae_fvu', None, 'SAE FVU')
+        add_scores_if_exists(fig, 'sae_multi_topk_fvu', None, 'SAE Multi Top-K FVU')
 
         ablation = '0' if 'zero' in node_score_type else 'patch'
         type = 'IG' if 'ig' in node_score_type else 'AtP'
@@ -400,7 +475,7 @@ def main():
         # add_scores_if_exists(fig, 'mean_res_norm', 'mean SAE residual norm')
 
         fig.update_layout(
-            title=f"Grokking Loss and Node Entropy over Epochs for seed {run_identifier} and node score type {node_score_type.replace('_', ' ')}", 
+            title=f"Grokking Loss and Node Entropy over Epochs for seed {run_identifier}", 
             xaxis_title="Epoch", 
             yaxis_title="Loss",
             width=1000

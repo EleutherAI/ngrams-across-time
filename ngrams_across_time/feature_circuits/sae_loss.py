@@ -1,23 +1,26 @@
 import torch as t
-from typing import Any
+from typing import Any, Callable
 from sae import Sae
 from sae.sae import ForwardOutput
 import nnsight
+from nnsight import LanguageModel, NNsight
+from nnsight.envoy import Envoy
 from ngrams_across_time.feature_circuits.dense_act import to_dense
 
 
 def sae_loss(
-        clean,
-        model,
-        submodules,
+        clean: t.Tensor,
+        model: LanguageModel | NNsight | Envoy,
+        submodules: list,
         dictionaries: dict[Any, Sae],
-        metric_fn,
+        metric_fn: Callable,
         metric_kwargs=dict(),
+        dummy_inputs: Any = "_"
 ):
     num_latents = next(iter(dictionaries.values())).num_latents
     # first run through the fake inputs to figure out which hidden states are tuples
     is_tuple = {}
-    with model.scan("_"):
+    with model.scan(dummy_inputs) as tracer:
         for submodule in submodules:
             is_tuple[submodule] = type(submodule.output.shape) == tuple
 
@@ -26,7 +29,8 @@ def sae_loss(
     
     # Get loss with all SAEs and no residuals
     mses = []
-    with model.trace(clean, scan=True), t.no_grad():
+    # breakpoint()
+    with model.trace(clean, scan=True), t.no_grad(): # IndexError: too many indices for tensor of dimension 2
         for submodule in submodules:
             x = submodule.output
             if is_tuple[submodule]:

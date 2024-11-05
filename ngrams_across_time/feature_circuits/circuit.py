@@ -1,11 +1,12 @@
-from collections import defaultdict
 from typing import Any
 
-import torch as t
-from einops import rearrange
+from nnsight.intervention import InterventionProxy
 
-from ngrams_across_time.feature_circuits.dense_act import DenseAct
-from ngrams_across_time.feature_circuits.attribution import patching_effect, jvp
+import torch as t
+import nnsight
+
+from ngrams_across_time.feature_circuits.dense_act import to_dense
+from ngrams_across_time.feature_circuits.attribution import patching_effect
 
 
 ###### utilities for dealing with sparse COO tensors ######
@@ -70,7 +71,7 @@ def sparse_mean(x, dim):
 
 ######## end sparse tensor utilities ########
 
-def get_residual_node_scores(
+def get_transformer_resid_node_scores(
         clean,
         patch,
         model,
@@ -83,7 +84,7 @@ def get_residual_node_scores(
         aggregation='sum', # or 'none' for not aggregating across sequence position
         method='ig' # get better approximations for early layers by using ig
 ):
-    all_submods = [embed] + [submod for layer_submods in zip(mlps, attns, resids) for submod in layer_submods]
+    all_submods = [embed] + [submod for layer_submods in zip(attns, mlps, resids) for submod in layer_submods]
     # first get the patching effect of everything on y
     effects, deltas, grads, total_effect = patching_effect(
         clean,
@@ -93,7 +94,8 @@ def get_residual_node_scores(
         {},
         metric_fn,
         metric_kwargs=metric_kwargs,
-        method=method
+        method=method,
+        dummy_input=clean[:3]
     )
 
     nodes: dict[Any, Any] = {'y' : total_effect}
@@ -111,199 +113,155 @@ def get_residual_node_scores(
     return nodes # each node corresponds to one SAE feature, so this corresponds to feature importance
 
 
-def get_circuit(
+
+def get_resid_node_scores(
         clean,
         patch,
         model,
-        embed,
-        attns,
-        mlps,
-        resids,
-        dictionaries,
+        all_submods,
         metric_fn,
         metric_kwargs=dict(),
-        aggregation='sum', # or 'none' for not aggregating across sequence position
-        nodes_only=False,
-        node_threshold=0.1,
-        edge_threshold=0.01,
+        aggregate=True,
         method='ig' # get better approximations for early layers by using ig
 ):
-    all_submods = [embed] + [submod for layer_submods in zip(mlps, attns, resids) for submod in layer_submods]
-    # first get the patching effect of everything on y
+
     effects, deltas, grads, total_effect = patching_effect(
         clean,
         patch,
         model,
         all_submods,
+        {},
+        metric_fn,
+        metric_kwargs=metric_kwargs,
+        method=method,
+        dummy_input=clean[:3]
+    )
+
+    nodes = {
+        submod.path: effects[submod]
+        for submod in all_submods
+    }
+
+    if aggregate:
+        nodes = {k : v.sum(dim=1) for k, v in nodes.items()}
+        
+    nodes['y'] = total_effect
+
+    nodes = {k : v.mean(dim=0) for k, v in nodes.items()}
+    return nodes
+
+def get_circuit(
+        clean,
+        patch,
+        model,
+        ordered_submods: list[Any],
+        dictionaries,
+        metric_fn,
+        metric_kwargs=dict(),
+        aggregate: bool = True, # or 'none' for not aggregating across sequence position
+        method='ig' # get better approximations for early layers by using ig
+):
+    """Get effect scores for each SAE feature using integrated gradients or AtP."""
+
+    effects, deltas, grads, total_effect = patching_effect(
+        clean,
+        patch,
+        model,
+        ordered_submods,
         dictionaries,
         metric_fn,
         metric_kwargs=metric_kwargs,
-        method=method 
+        method=method,
+        dummy_input=clean[:3]
     )
 
-    def unflatten(tensor): # will break if dictionaries vary in size between layers
-        b, s, f = effects[resids[0]].act.shape
-        unflattened = rearrange(tensor, '(b s x) -> b s x', b=b, s=s)
-        return DenseAct(act=unflattened[...,:f], res=unflattened[...,f:])
-    
-    # indices where effects are above the threshold
-    features_by_submod = {
-        submod : (effects[submod].to_tensor().flatten().abs() > node_threshold).nonzero().flatten().tolist() for submod in all_submods
+    nodes = {
+        submod.path: effects[submod]
+        for submod in ordered_submods
     }
 
-    n_layers = len(resids)
+    if aggregate:
+        nodes = {k : v.sum(dim=1) for k, v in nodes.items()}
 
-    nodes: dict[Any, Any] = {'y' : total_effect}
-    nodes[embed.path] = effects[embed]
-    for i in range(n_layers):
-        nodes[attns[i].path] = effects[attns[i]]
-        nodes[mlps[i].path] = effects[mlps[i]]
-        nodes[resids[i].path] = effects[resids[i]]
+    nodes['y'] = total_effect
 
-    if nodes_only:
-        if aggregation == 'sum':
-            for k in nodes:
-                if k != 'y':
-                    nodes[k] = nodes[k].sum(dim=1)
-        nodes = {k : v.mean(dim=0) for k, v in nodes.items()}
-        return nodes, None # each node corresponds to one SAE feature, so this corresponds to feature importance
-
-    edges = defaultdict(lambda : {})
-
-    edges[f'resid_{len(resids)-1}'] = { 'y' : effects[resids[-1]].to_tensor().flatten().to_sparse() }
-
-    def N(upstream, downstream):
-        return jvp(
-            clean,
-            model,
-            dictionaries,
-            downstream,
-            features_by_submod[downstream.path],
-            upstream,
-            grads[downstream],
-            deltas[upstream],
-            return_without_right=True,
-        )
-
-    # now we work backward through the model to get the edges
-    for layer in reversed(range(len(resids))):
-        resid = resids[layer]
-        mlp = mlps[layer]
-        attn = attns[layer]
-
-        mlp_resid_effect, mlp_resid_grad = N(mlp, resid)
-        attn_resid_effect, attn_resid_grad = N(attn, resid)
-
-        edges[f'mlp_{layer}'][f'resid_{layer}'] = mlp_resid_effect
-        edges[f'attn_{layer}'][f'resid_{layer}'] = attn_resid_effect
-
-        if layer > 0:
-            prev_resid = resids[layer-1]
-        else:
-            prev_resid = embed
-
-        resid_mlp_effect, _ = N(prev_resid, mlp)
-        resid_attn_effect, _ = N(prev_resid, attn)
-
-        mlp_resid_grad = mlp_resid_grad.coalesce()
-        attn_resid_grad = attn_resid_grad.coalesce()
-
-        RMR_effect = jvp(
-            clean,
-            model,
-            dictionaries,
-            mlp,
-            features_by_submod[resid.path],
-            prev_resid,
-            {feat_idx : unflatten(mlp_resid_grad[feat_idx].to_dense()) for feat_idx in features_by_submod[resid.path]},
-            deltas[prev_resid],
-        )
-        RAR_effect = jvp(
-            clean,
-            model,
-            dictionaries,
-            attn,
-            features_by_submod[resid.path],
-            prev_resid,
-            {feat_idx : unflatten(attn_resid_grad[feat_idx].to_dense()) for feat_idx in features_by_submod[resid.path]},
-            deltas[prev_resid],
-        )
-        RR_effect, _ = N(prev_resid, resid)
-
-        if layer > 0: 
-            edges[f'resid_{layer-1}'][f'mlp_{layer}'] = resid_mlp_effect
-            edges[f'resid_{layer-1}'][f'attn_{layer}'] = resid_attn_effect
-            edges[f'resid_{layer-1}'][f'resid_{layer}'] = RR_effect - RMR_effect - RAR_effect
-        else:
-            edges['embed'][f'mlp_{layer}'] = resid_mlp_effect
-            edges['embed'][f'attn_{layer}'] = resid_attn_effect
-            edges['embed'][f'resid_0'] = RR_effect - RMR_effect - RAR_effect
-
-    # rearrange weight matrices
-    for child in edges:
-        # get shape for child
-        bc, sc, fc = nodes[child].act.shape
-        for parent in edges[child]:
-            weight_matrix = edges[child][parent]
-            if parent == 'y':
-                weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
-            else:
-                bp, sp, fp = nodes[parent].act.shape
-                assert bp == bc
-                weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
-            edges[child][parent] = weight_matrix
+    nodes = {k : v.mean(dim=0) for k, v in nodes.items()}
     
-    if aggregation == 'sum':
-        # aggregate across sequence position
-        for child in edges:
-            for parent in edges[child]:
-                weight_matrix = edges[child][parent]
-                if parent == 'y':
-                    weight_matrix = weight_matrix.sum(dim=1)
-                else:
-                    weight_matrix = weight_matrix.sum(dim=(1, 4))
-                edges[child][parent] = weight_matrix
-        for node in nodes:
-            if node != 'y':
-                nodes[node] = nodes[node].sum(dim=1)
+    return nodes 
 
-        # aggregate across batch dimension
-        for child in edges:
-            bc, fc = nodes[child].act.shape
-            for parent in edges[child]:
-                weight_matrix = edges[child][parent]
-                if parent == 'y':
-                    weight_matrix = weight_matrix.sum(dim=0) / bc
-                else:
-                    bp, fp = nodes[parent].act.shape
-                    assert bp == bc
-                    weight_matrix = weight_matrix.sum(dim=(0,2)) / bc
-                edges[child][parent] = weight_matrix
-        for node in nodes:
-            if node != 'y':
-                nodes[node] = nodes[node].mean(dim=0)
+
+def get_mean_sae_entropy(
+        model,
+        ordered_submods: list[Any],
+        dictionaries,
+        data,
+        batch_size: int | None = None,
+        aggregate: bool = True, # or 'none' for not aggregating across sequence position
+        device: str | t.device = t.device("cuda")
+):
+    num_latents = next(iter(dictionaries.values())).num_latents
+
+    if batch_size is None:
+        batch_size = len(data)
+
+    is_tuple = {}
+    with model.scan(data[:2]):
+        for submodule in ordered_submods:
+            is_tuple[submodule] = type(submodule.output.shape) == tuple
     
-    elif aggregation == 'none':
+    accumulated_nodes = {}
+    accumulated_fvu = {}
+    accumulated_multi_topk_fvu = {}
+    total_samples = 0
 
-        # aggregate across batch dimensions
-        for child in edges:
-            # get shape for child
-            bc, sc, fc = nodes[child].act.shape
-            for parent in edges[child]:
-                weight_matrix = edges[child][parent]
-                if parent == 'y':
-                    weight_matrix = sparse_reshape(weight_matrix, (bc, sc, fc+1))
-                    weight_matrix = weight_matrix.sum(dim=0) / bc
-                else:
-                    bp, sp, fp = nodes[parent].act.shape
-                    assert bp == bc
-                    weight_matrix = sparse_reshape(weight_matrix, (bp, sp, fp+1, bc, sc, fc+1))
-                    weight_matrix = weight_matrix.sum(dim=(0, 3)) / bc
-                edges[child][parent] = weight_matrix
-        for node in nodes:
-            nodes[node] = nodes[node].mean(dim=0)
+    for batch_start in range(0, len(data), batch_size):
+        batch_end = min(batch_start + batch_size, len(data))
+        batch_data = data[batch_start:batch_end].to(device)
+        current_batch_size = len(batch_data)
+        if current_batch_size != batch_size:
+            # print("Truncating data to multiple of batch size")
+            break
+        
+        batch_nodes = {}
+        batch_fvus = {}
+        batch_multi_topk_fvus = {}
+        with model.trace(batch_data, scan=True):
+            for submodule in ordered_submods:
+                input = submodule.output if not is_tuple[submodule] else submodule.output[0]
 
-    else:
-        raise ValueError(f"Unknown aggregation: {aggregation}")
+                dictionary = dictionaries[submodule]
+                flat_f: InterventionProxy = nnsight.apply(dictionary.forward, input.flatten(0, 1))
+                batch_fvus[submodule.path] = flat_f.fvu.cpu().detach().save()
+                batch_multi_topk_fvus[submodule.path] = flat_f.multi_topk_fvu.cpu().detach().save()
+                latent_acts = flat_f.latent_acts.reshape(input.shape[0], input.shape[1], -1)
+                latent_indices = flat_f.latent_indices.reshape(input.shape[0], input.shape[1], -1)
+                dense = to_dense(latent_acts, latent_indices, num_latents)
+                batch_nodes[submodule.path] = dense.cpu().detach().save()
+        
+        if aggregate:
+            batch_nodes = {k: v.sum(dim=1) for k, v in batch_nodes.items()}
+        
+        for k, v in batch_nodes.items():
+            if k not in accumulated_nodes:
+                accumulated_nodes[k] = t.zeros_like(v)
+            accumulated_nodes[k] += v * current_batch_size
 
-    return nodes, edges
+        for k, v in batch_fvus.items():
+            if k not in accumulated_fvu:
+                accumulated_fvu[k] = 0
+            accumulated_fvu[k] += v * current_batch_size
+
+        for k, v in batch_multi_topk_fvus.items():
+            if k not in accumulated_multi_topk_fvu:
+                accumulated_multi_topk_fvu[k] = 0
+            accumulated_multi_topk_fvu[k] += v * current_batch_size
+        
+        total_samples += current_batch_size
+
+    nodes = {k: v / total_samples for k, v in accumulated_nodes.items()}
+    fvu = {k: v / total_samples for k, v in accumulated_fvu.items()}
+    multi_topk_fvu = {k: v / total_samples for k, v in accumulated_multi_topk_fvu.items()}
+
+    nodes = {k: v.mean(dim=0) for k, v in nodes.items()}
+    
+    return nodes, fvu, multi_topk_fvu

@@ -11,7 +11,6 @@ from argparse import ArgumentParser
 import random
 from pathlib import Path
 
-from scipy import stats, signal
 import torch.nn.functional as F
 import torch
 import numpy as np

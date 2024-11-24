@@ -199,8 +199,6 @@ def get_mean_sae_entropy(
         aggregate: bool = True, # or 'none' for not aggregating across sequence position
         device: str | t.device = t.device("cuda")
 ):
-    num_latents = next(iter(dictionaries.values())).num_latents
-
     if batch_size is None:
         batch_size = len(data)
 
@@ -227,6 +225,7 @@ def get_mean_sae_entropy(
         batch_multi_topk_fvus = {}
         with model.trace(batch_data, scan=True):
             for submodule in ordered_submods:
+                num_latents = dictionaries[submodule].num_latents
                 input = submodule.output if not is_tuple[submodule] else submodule.output[0]
 
                 dictionary = dictionaries[submodule]

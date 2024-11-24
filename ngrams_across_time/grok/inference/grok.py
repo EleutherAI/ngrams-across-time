@@ -5,7 +5,6 @@ from pathlib import Path
 import torch.nn.functional as F
 import torch
 import numpy as np
-from torch import Tensor
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from nnsight import LanguageModel
@@ -17,9 +16,12 @@ import lovely_tensors as lt
 from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.grok.transformers import CustomTransformer, TransformerConfig
-from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square, abs_score_entropy
-from ngrams_across_time.grok.inference.pythia import all_node_scores, 
+from ngrams_across_time.grok.metrics import gini, hoyer, hoyer_square, abs_score_entropy
+from ngrams_across_time.grok.inference.pythia import concatenate_values
 
+import plotly.io as pio
+
+pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3469
 lt.monkey_patch()
 set_seeds(598)
 device = torch.device("cuda")
@@ -147,7 +149,7 @@ def main():
             checkpoint_data[epoch][f'sae_multi_topk_fvu'] = mean_multi_topk_fvu
             checkpoint_data[epoch][f'sae_entropy_nodes'] = {'nodes': nodes}   
 
-            node_scores = all_node_scores(nodes)
+            node_scores = concatenate_values(nodes)
 
             # Sparsity metrics
             checkpoint_data[epoch][f'sae_entropy'] = abs_score_entropy(node_scores)

@@ -1,11 +1,9 @@
 import os
 from argparse import ArgumentParser
 from pathlib import Path
+from typing import Any
 
 from plotly.subplots import make_subplots
-
-
-from scipy import stats
 import torch.nn.functional as F
 import torch
 import torch as t
@@ -16,7 +14,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import nnsight
 from nnsight.intervention import InterventionProxy
 from nnsight import LanguageModel
-from sae import SaeConfig, Sae, TrainConfig, SaeTrainer
+from sae import Sae
 import plotly.graph_objects as go
 import lovely_tensors as lt
 from sae.data import MemmapDataset
@@ -24,32 +22,33 @@ from torch.utils.data import DataLoader
 
 from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square, abs_score_entropy
 from ngrams_across_time.feature_circuits.dense_act import to_dense
-from ngrams_across_time.utils.utils import assert_type, set_seeds
+from ngrams_across_time.utils.utils import set_seeds
 from ngrams_across_time.language.hf_client import get_model_checkpoints
 
+import plotly.io as pio
+
+pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3469
 lt.monkey_patch()
 set_seeds(598)
 device = torch.device("cuda")
 
 @torch.no_grad()
+# TODO enable non-aggregated nodes across batches
+# TODO use version in mnist_vit
 def get_sae_acts(
         model,
         ordered_submods: list,
         dictionaries,
         dataloader,
-        aggregate: bool = True, # or 'none' for not aggregating across sequence position
-        mean: bool = True,
+        aggregate: bool = True, # across sequence positions
+        mean: bool = True, # across batches
         device: str | t.device = t.device("cuda"),
         input_key: str = 'input_ids',
 ):
-    # Collect metadata and preallocate tensors
-    num_latents = next(iter(dictionaries.values())).num_latents
+    # Collect metadata
     batch_size = 0
     seq_len = 0
     is_tuple = {}
-    accumulated_nodes = {}
-    accumulated_fvu = {}
-    accumulated_multi_topk_fvu = {}
     with torch.amp.autocast(str(device)):  # Enable automatic mixed precision
         for batch in dataloader:
             with model.scan(batch[input_key].to(device)):
@@ -59,8 +58,14 @@ def get_sae_acts(
                     is_tuple[submodule] = isinstance(submodule.output.shape, tuple) 
             break
 
+    # Prepare data structures
+    accumulated_nodes = {}
+    accumulated_fvu = {}
+    accumulated_multi_topk_fvu = {}
     for submodule in ordered_submods:
+        num_latents = dictionaries[submodule].num_latents
         shape = (batch_size, num_latents) if aggregate else (batch_size, seq_len, num_latents)
+        
         accumulated_nodes[submodule.path] = torch.zeros(shape)
         accumulated_fvu[submodule.path] = 0
         accumulated_multi_topk_fvu[submodule.path] = 0
@@ -128,24 +133,19 @@ def compute_losses(model, dataloader, device):
     
     return total_loss / num_batches
 
-def all_node_scores(checkpoint_scores) -> np.ndarray:
-        scores = []
-        for node, values in checkpoint_scores.items():
-            if node == 'y':
-                continue
-            if isinstance(values, Tensor):
-                scores.extend(values.flatten().tolist())
-            else:
-                scores.extend(values.act.flatten().tolist())
-        return np.array(scores)
+
+def concatenate_values(dictionary: dict[Any, Tensor]) -> np.ndarray:
+    scores = []
+    for values in dictionary.values():
+        scores.extend(values.flatten().tolist())
+        
+    return np.array(scores)
 
 
 def get_args():
     parser = ArgumentParser()
     parser.add_argument("--inference", action="store_true")
     parser.add_argument("--debug", action="store_true")
-    # parser.add_argument("--run_name", type=str, default='')
-    # parser.add_argument("--sae_name", type=str, default='')
     return parser.parse_args()
 
 
@@ -153,6 +153,7 @@ def main():
     images_path = Path("images")
     images_path.mkdir(exist_ok=True)
     model_name = "pythia-160m"
+    sae_path = Path(f"/mnt/ssd-1/lucia/sae/")
     batch_size = 16  # Adjust based on your GPU memory
 
     args = get_args()
@@ -174,7 +175,7 @@ def main():
         train_data = data.select(rng=range(100_000))
         test_data = data.select(rng=range(100_000, 100_000 + 2048))
         # Subset of data to collect eval metrics
-        len_sample_data = 4 if args.debug else 512
+        len_sample_data = 32 if args.debug else 512
 
         # NNSight requires a tokenizer. We are passing in tensors so any tokenizer will do
         tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
@@ -183,9 +184,9 @@ def main():
         for step_number, checkpoint in tqdm(log_checkpoints.items()):
             if step_number not in checkpoint_data:
                 checkpoint_data[step_number] = {}
-            elif 'gini' in checkpoint_data[step_number]:
-                print(f"Skipping step {step_number} because it already exists")
-                continue
+            # elif 'gini' in checkpoint_data[step_number]:
+            #     print(f"Skipping step {step_number} because it already exists")
+            #     continue
 
             # Load model and SAEs
             model = AutoModelForCausalLM.from_pretrained(
@@ -200,47 +201,21 @@ def main():
 
             nnsight_model = LanguageModel(model, tokenizer=tokenizer)
 
-
-            # sae_path = Path(f"/mnt/ssd-1/lucia/sae/{run_identifier}/grok.{checkpoint}")
-            # if not sae_path.exists():
-            #     hookpoints = ["gpt_neox.embed_in"]
-            #     for layer in range(len(model.gpt_neox.layers)):
-            #         hookpoints.extend([f"gpt_neox.layers.{layer}.attention", f"gpt_neox.layers.{layer}.mlp"])
-
-            #     cfg = TrainConfig(
-            #         SaeConfig(multi_topk=True, expansion_factor=32, k=model.config.hidden_size // 2), 
-            #         batch_size=batch_size,
-            #         run_name=str(sae_path),
-            #         log_to_wandb=True,
-            #         hookpoints=hookpoints,
-            #     )
-            #     trainer = SaeTrainer(cfg, train_data, model)
-            #     trainer.fit()
-            
-            # attns = [layer.attention for layer in nnsight_model.gpt_neox.layers]
-            # mlps = [layer.mlp for layer in nnsight_model.gpt_neox.layers]
             dictionaries = {}
-            layer_indices = list(range(len(nnsight_model.gpt_neox.layers)))[1::2]
-            resids = [layer for layer in list(nnsight_model.gpt_neox.layers)[1::2]]
+            layer_indices = list(range(len(nnsight_model.gpt_neox.layers)))[1::2] # type: ignore
+            resids = [layer for layer in list(nnsight_model.gpt_neox.layers)[1::2]] # type: ignore
 
             for i, resid in zip(layer_indices, resids):
-                sae_path = Path(f"/mnt/ssd-1/lucia/sae/{run_identifier} step {step_number} L{i}")
-                # dictionaries[attns[i]] = Sae.load_from_disk(
-                #     os.path.join(sae_path, f'layers.{i}.attention'),
-                #     device=device
-                # )
-                # dictionaries[mlps[i]] = Sae.load_from_disk(
-                #     os.path.join(sae_path, f'layers.{i}.mlp'),
-                #     device=device
-                # )                
                 dictionaries[resid] = Sae.load_from_disk(
-                    os.path.join(sae_path, f'layers.{i}'),
+                    sae_path / f"{run_identifier} step {step_number} L{i}" / f'layers.{i}',
                     device=device
                 )
             all_submods = resids
 
             # Collect metrics
-            checkpoint_data[step_number]['parameter_norm'] = torch.cat([parameters.flatten() for parameters in model.parameters()]).flatten().norm(p=2).item()
+            checkpoint_data[step_number]['parameter_norm'] = torch.cat(
+                [parameters.flatten() for parameters in model.parameters()]
+            ).flatten().norm(p=2).item()
 
             train_dataloader = DataLoader(train_data.select(range(len_sample_data)), batch_size=batch_size, drop_last=True) 
             test_dataloader = DataLoader(test_data.select(range(len_sample_data)), batch_size=batch_size, drop_last=True) 
@@ -251,28 +226,30 @@ def main():
 
             nodes, fvu, multi_topk_fvu = get_sae_acts(
                 nnsight_model, all_submods, dictionaries, 
-                nnsight_dataloader, aggregate=True, mean=False
+                nnsight_dataloader, aggregate=False, mean=False
             )
 
-            mean_fvu = np.mean([v for v in fvu.values()])
-            mean_multi_topk_fvu = np.mean([v for v in multi_topk_fvu.values()])
-
-            checkpoint_data[step_number][f'sae_fvu'] = mean_fvu
-            checkpoint_data[step_number][f'sae_multi_topk_fvu'] = mean_multi_topk_fvu
-            checkpoint_data[step_number][f'sae_entropy_nodes'] = {'nodes': nodes}   
-
+            checkpoint_data[step_number][f'sae_fvu'] = np.mean(list(fvu.values()))
+            checkpoint_data[step_number][f'sae_multi_topk_fvu'] = np.mean(
+                list(multi_topk_fvu.values())
+            )
+            checkpoint_data[step_number][f'sae_entropy_nodes'] = {'nodes': nodes}
+               
             mean_nodes = {k: v.mean(dim=0) for k, v in nodes.items()}
-            mean_node_scores = all_node_scores(mean_nodes)
+            mean_node_scores = concatenate_values(mean_nodes)
 
             checkpoint_data[step_number][f'sae_entropy'] = abs_score_entropy(mean_node_scores)
             checkpoint_data[step_number][f'hoyer'] = hoyer(mean_node_scores)
             checkpoint_data[step_number][f'hoyer_square'] = hoyer_square(mean_node_scores)
             checkpoint_data[step_number][f'gini'] = gini(mean_node_scores)
 
-            node_scores = all_node_scores(nodes)
+            # TODO add unaggregated nodes
+            node_scores = concatenate_values(nodes)
+            breakpoint()
             checkpoint_data[step_number]['mean_l2'] = mean_l2(torch.tensor(node_scores))
             checkpoint_data[step_number]['var_trace'] = var_trace(torch.tensor(node_scores))
 
+            exit(0)
             torch.save(checkpoint_data, OUT_PATH)
 
             # Print all metrics

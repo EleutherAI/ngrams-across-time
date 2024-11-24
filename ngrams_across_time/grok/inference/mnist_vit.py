@@ -22,7 +22,7 @@ import nnsight
 
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square
-from ngrams_across_time.grok.conc_pythia import all_node_scores, abs_score_entropy
+from ngrams_across_time.grok.inference.pythia import all_node_scores, abs_score_entropy
 from ngrams_across_time.feature_circuits.dense_act import to_dense
 
 @torch.no_grad()

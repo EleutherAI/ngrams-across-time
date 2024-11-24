@@ -10,7 +10,6 @@ from torch import Tensor
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from transformers import ViTForImageClassification, ViTConfig
-from PIL import Image
 from datasets import Dataset as HfDataset, load_dataset
 from sae import SaeConfig, SaeTrainer, TrainConfig
 from tqdm import tqdm
@@ -266,10 +265,8 @@ for epoch in range(num_epochs):
 
         dummy_inputs={'pixel_values': torch.randn(3, 1, 28, 28)}
 
-        breakpoint()
         trainer = SaeTrainer(cfg, train_dataset, model, dummy_inputs)
         trainer.fit()
-        breakpoint()
 
 print("Training completed!")
 

@@ -2,6 +2,7 @@
 import numpy as np
 from torch import Tensor
 import torch
+from scipy import signal
 
 
 def mean_l2(tensor: Tensor) -> Tensor:
@@ -27,7 +28,7 @@ def hoyer_square(vec):
     return np.linalg.norm(vec_squared, 1) / np.linalg.norm(vec_squared, 2)
 
 
-# Currently unused
+# Unused
 def spectral_entropy(signal_data, sf, nperseg=None, normalize=True):
     """
     Calculate spectral entropy of a time series signal.
@@ -60,7 +61,7 @@ def spectral_entropy(signal_data, sf, nperseg=None, normalize=True):
     if nperseg is None:
         nperseg = int(sf * 2)
     
-    frequencies, psd = signal.welch(signal_data, sf, nperseg=nperseg)
+    _, psd = signal.welch(signal_data, sf, nperseg=nperseg)
     
     psd_norm = psd / psd.sum()
     

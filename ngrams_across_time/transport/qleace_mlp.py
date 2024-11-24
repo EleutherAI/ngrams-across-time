@@ -1,43 +1,30 @@
-from argparse import ArgumentParser
-from itertools import pairwise
-from turtle import xcor
-from typing import Callable, Sized
+# Sequential MLP probe can't learn LEACE
+# Sequential MLP without pytorch lightning can learn LEACE
+# Something in probe.fit
 
-import math
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import WandbLogger
+import torchmetrics as tm
+
+from argparse import ArgumentParser
+from typing import Callable, Sized
+from pathlib import Path
+from torch.utils.data import DataLoader
+import wandb
+from torchmetrics import Accuracy
+
 import torch
 import torch.nn.functional as F
-import torchmetrics as tm
 import torchvision as tv
-from concept_erasure import LeaceFitter, OracleFitter, QuadraticFitter, LeaceEraser, QuadraticEraser
-from pytorch_lightning.loggers import WandbLogger
+from concept_erasure import LeaceFitter, OracleEraser, OracleFitter, QuadraticFitter, LeaceEraser
 from torch.utils.data import Subset
 from torch import Tensor, nn
 from torch.utils.data import Dataset, random_split
 from torchvision.datasets import CIFAR10
 from tqdm.auto import tqdm
-from pytorch_lightning.callbacks import Callback
+import lovely_tensors as lt
 
-
-class Log2CheckpointCallback(Callback):
-    def __init__(self, filepath):
-        super().__init__()
-        self.filepath = filepath
-        self.last_saved_step = 0
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        global_step = trainer.global_step
-        if global_step == 0:
-            return
-
-        if self.is_power_of_two(global_step) and global_step > self.last_saved_step:
-            filename: str = f"{self.filepath}/step={global_step:07d}.ckpt"
-            trainer.save_checkpoint(filename)
-            self.last_saved_step = global_step
-
-    @staticmethod
-    def is_power_of_two(n):
-        return (n & (n-1) == 0) and n != 0
+lt.monkey_patch()
 
 torch.set_default_tensor_type(torch.DoubleTensor)
 
@@ -103,85 +90,108 @@ class Mlp(pl.LightningModule):
         return torch.optim.AdamW(self.parameters())
 
 
-class ResMlp(Mlp):    
-    def build_net(self):
-        sizes = [3 * 32 * 32] + [self.hparams['h']] + [self.hparams['k']]
-
-        self.net = nn.Sequential(
-            *[
-                MlpBlock(in_dim, out_dim, device=self.device, dtype=self.dtype)
-                for in_dim, out_dim in pairwise(sizes)
-            ]
-        )
-        self.reset_parameters()
+# class Mlp(pl.LightningModule):
+#     def __init__(self, k, h=128):
+#         super().__init__()
+#         self.k = k
+#         self.h = h
+#         self.build_net()
+#         self.train_acc = Accuracy(task="multiclass", num_classes=k)
+#         self.val_acc = Accuracy(task="multiclass", num_classes=k)
+#         self.test_acc = Accuracy(task="multiclass", num_classes=k)
     
-    def reset_parameters(self):
-        # ResNet initialization
-        for m in self.net.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+#     def build_net(self):
+#         self.net = nn.Sequential(
+#             nn.Linear(32 * 32 * 3, self.h),
+#             nn.ReLU(),
+#             nn.Linear(self.h, self.h),
+#             nn.ReLU(),
+#             nn.Linear(self.h, self.k),
+#         )
+
+#     def forward(self, x):
+#         return self.net(x)
+
+#     def training_step()
+
+
+def train_epoch(model, train_loader, optimizer, device):
+    model.train()
+    total_loss = 0
+    for data, target in train_loader:
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()
+        output = model(data)
+        loss = F.cross_entropy(output, target)
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        model.train_acc(output, target)
+        
+        if wandb.run is not None:
+            wandb.log({"train_loss": loss.item()})
     
-    def configure_optimizers(self):
-        return torch.optim.SGD(
-            self.parameters(), lr=0.005, momentum=0.9, weight_decay=5e-4
-        )
-
-
-class ResNet(Mlp):
-    def build_net(self):
-        self.net = tv.models.resnet18(pretrained=False, num_classes=self.hparams['k'])
-
-    def configure_optimizers(self):
-        return torch.optim.SGD(
-            self.parameters(), lr=0.005, momentum=0.9, weight_decay=5e-4
-        )
-
-
-class ViT(Mlp):
-    def build_net(self):
-        self.net = tv.models.resnet18(pretrained=False, num_classes=self.hparams['k'])
+    epoch_loss = total_loss / len(train_loader)
+    train_acc = model.train_acc.compute()
+    model.train_acc.reset()
     
-    def configure_optimizers(self):
-        return torch.optim.SGD(
-            self.parameters(), lr=0.005, momentum=0.9, weight_decay=5e-4
-        )
+    if wandb.run is not None:
+        wandb.log({"train_epoch_loss": epoch_loss, "train_acc": train_acc})
+    return epoch_loss, train_acc
 
+def evaluate(model, loader, device, mode='val'):
+    model.eval()
+    total_loss = 0
+    acc_metric = model.val_acc if mode == 'val' else model.test_acc
+    
+    with torch.no_grad():
+        for data, target in loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            loss = F.cross_entropy(output, target)
+            total_loss += loss.item()
+            acc_metric(output, target)
+    
+    avg_loss = total_loss / len(loader)
+    acc = acc_metric.compute()
+    acc_metric.reset()
+    
+    if wandb.run is not None:
+        wandb.log({
+            f"{mode}_loss": avg_loss,
+            f"{mode}_acc": acc
+        })
+    return avg_loss, acc
 
-class MlpBlock(nn.Module):
-    def __init__(self, in_features: int, out_features: int, device=None, dtype=None):
-        super().__init__()
-
-        self.linear1 = nn.Linear(
-            in_features, out_features, bias=False, device=device, dtype=dtype
-        )
-        self.linear2 = nn.Linear(
-            out_features, out_features, bias=False, device=device, dtype=dtype
-        )
-        self.bn1 = nn.BatchNorm1d(out_features, device=device, dtype=dtype)
-        self.bn2 = nn.BatchNorm1d(out_features, device=device, dtype=dtype)
-        self.downsample = (
-            nn.Linear(in_features, out_features, bias=False, device=device, dtype=dtype)
-            if in_features != out_features
-            else None
-        )
-
-    def forward(self, x):
-        identity = x
-
-        out = self.linear1(x)
-        out = self.bn1(out)
-        out = nn.functional.relu(out)
-
-        out = self.linear2(out)
-        out = self.bn2(out)
-
-        if self.downsample is not None:
-            identity = self.downsample(identity)
-
-        out += identity
-        out = nn.functional.relu(out)
-
-        return out
+def train_model(model, train_dataset, val_dataset, test_dataset, args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    
+    if not args.debug:
+        wandb.init(name=args.name, project="mdl", entity="eleutherai")
+    
+    batch_size = 128
+    num_workers = 8
+    train_loader, val_loader, test_loader = (
+        DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers),
+        DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers),
+        DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    )
+    
+    optimizer = torch.optim.AdamW(model.parameters())
+    
+    for epoch in range(200):
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, device)
+        
+        val_loss, val_acc = evaluate(model, val_loader, device, mode='val')
+        
+        print(f'Epoch {epoch+1}/200')
+        print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}')
+        print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}')
+    
+    test_loss, test_acc = evaluate(model, test_loader, device, mode='test')
+    print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
 
 
 class LeacedDataset(Dataset):
@@ -207,18 +217,15 @@ class LeacedDataset(Dataset):
         if isinstance(self.eraser, LeaceEraser):
             x_erased = self.eraser(x.flatten())
             x = x_erased.reshape(x.shape)
+        elif isinstance(self.eraser, OracleEraser):
+            x_erased = self.eraser(x.flatten(), torch.tensor(z).unsqueeze(0))
+            x = x_erased.reshape(x.shape)
         else:
-            z_tensor = torch.tensor(data=z)
+            z_tensor = torch.tensor(z)
             if z_tensor.ndim == 0:
                 z_tensor = z_tensor.unsqueeze(0)
             x = self.eraser(x.unsqueeze(0), z_tensor)
         return self.transform(x), z
-
-        #             z_tensor = torch.tensor(data=z).type_as(x).to(torch.int64)
-        #     if z_tensor.ndim == 0:
-        #         z_tensor = z_tensor.unsqueeze(0)
-        #     x = self.eraser(x.unsqueeze(0), z_tensor)
-        # return self.transform(x), z
 
     def __len__(self):
         return len(self.dataset)
@@ -251,8 +258,8 @@ if __name__ == "__main__":
     k = 10  # Number of classes
     final = nn.Identity() if args.net == "resnet" else nn.Flatten(0)
     train_trf = tv.transforms.Compose([
-        # tv.transforms.RandomHorizontalFlip(), # Increases norm of class covariance diff
-        # tv.transforms.RandomCrop(32, padding=4),
+        tv.transforms.RandomHorizontalFlip(),
+        tv.transforms.RandomCrop(32, padding=4),
         final,
     ])
     if args.eraser != "none":
@@ -263,13 +270,12 @@ if __name__ == "__main__":
         }[args.eraser]
 
         fitter = cls(3 * 32 * 32, k, dtype=torch.float64, device=device, shrinkage=False)
-        if args.debug:
-            train = Subset(train, range(100))
-            eraser = QuadraticEraser(
-                torch.zeros(3 * 32 * 32, dtype=torch.float64), 
-                global_mean=torch.zeros(3 * 32 * 32, dtype=torch.float64),
-                ot_maps=torch.zeros(10, 3 * 32 * 32, 3 * 32 * 32, dtype=torch.float64),
-            )
+        state_path = Path("erasers_cache") / f"cifar10_state.pth"
+        state_path.parent.mkdir(exist_ok=True)
+        state = {} if not state_path.exists() else torch.load(state_path)
+        
+        if args.eraser in state:
+            eraser = state[args.eraser]
         else:
             for x, y in tqdm(train):
                 y = torch.as_tensor(y).view(1)
@@ -279,30 +285,35 @@ if __name__ == "__main__":
                 fitter.update(x.view(1, -1).to(device), y.to(device))
 
             eraser = fitter.eraser.to("cpu")
+
+            state[args.eraser] = eraser
+            torch.save(state, state_path)
     else:
         eraser = lambda x, y: x
     train = LeacedDataset(train, eraser, transform=train_trf)
     val = LeacedDataset(val, eraser, transform=final)
     test = LeacedDataset(test, eraser, transform=final)
 
+    if args.debug:
+        train = Subset(train, range(10_000))
+    
     # Create the data module
     dm = pl.LightningDataModule.from_datasets(train, val, test, batch_size=128, num_workers=8)
     
     model_cls = {
         "mlp": Mlp,
-        "resmlp": ResMlp,
-        "resnet": ResNet,
+        # "resmlp": ResMlp,
+        # "resnet": ResNet,
     }[args.net]
     model = model_cls(k, h=args.width)
+    train_model(model, train, val, test, args)
 
-    trainer = pl.Trainer(
-        callbacks=[
-            # EarlyStopping(monitor="val_loss", patience=5),
-            Log2CheckpointCallback(filepath=f'checkpoints-{args.width}')
-        ],
-        logger=WandbLogger(name=args.name, project="mdl", entity="eleutherai") if not args.debug else None,
-        max_epochs=200,
-        precision=64
-    )
-    trainer.fit(model, dm)
-    trainer.test(model, dm)
+    # trainer = pl.Trainer(
+    #     logger=WandbLogger(name=args.name, project="mdl", entity="eleutherai") if not args.debug else None,
+    #     max_epochs=200,
+    #     precision=64,
+    #     deterministic=True,
+    #     gradient_clip_val=None,
+    # )
+    # trainer.fit(model, dm)
+    # trainer.test(model, dm)

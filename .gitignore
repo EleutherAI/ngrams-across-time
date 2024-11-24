@@ -231,3 +231,5 @@ MNIST/
 mdl/
 images/
 checkpoints-128/
+cifar-10-batches-py/
+transformer-reasoning/

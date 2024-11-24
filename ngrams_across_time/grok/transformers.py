@@ -1,3 +1,5 @@
+# Custom transformer used for the modular addition grokking experiments
+
 from transformers import PreTrainedModel, PretrainedConfig
 import torch as t
 import torch.nn as nn

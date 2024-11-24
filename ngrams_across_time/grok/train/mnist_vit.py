@@ -185,7 +185,7 @@ wd = 0.
 optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=wd)
 
 run_identifier = f"mnist_seed_{args.seed}{'_' + args.run_name if args.run_name else ''}"
-checkpoints_path = Path("vit_ckpts") / run_identifier
+checkpoints_path = Path("data/vit_ckpts") / run_identifier
 checkpoints_path.mkdir(exist_ok=True)
 
 checkpoints = []

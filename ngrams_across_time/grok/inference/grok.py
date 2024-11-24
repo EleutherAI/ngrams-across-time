@@ -2,7 +2,6 @@ import os
 from argparse import ArgumentParser
 from pathlib import Path
 
-from scipy import stats, signal
 import torch.nn.functional as F
 import torch
 import numpy as np
@@ -18,64 +17,12 @@ import lovely_tensors as lt
 from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.grok.transformers import CustomTransformer, TransformerConfig
-
+from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square
+from ngrams_across_time.grok.conc_pythia import all_node_scores, abs_score_entropy
 
 lt.monkey_patch()
 set_seeds(598)
 device = torch.device("cuda")
-
-
-def all_node_scores(checkpoint_scores) -> list[float]:
-        scores = []
-        for node, values in checkpoint_scores.items():
-            if node == 'y':
-                continue
-            if isinstance(values, Tensor):
-                scores.extend(values.flatten().tolist())
-            else:
-                scores.extend(values.act.flatten().tolist())
-        return scores
-
-def abs_score_entropy(nodes):
-    scores = [abs(score) for score in all_node_scores(nodes)]
-    sum_scores = sum(scores)
-
-    probs = np.array([score / sum_scores for score in scores])
-    return stats.entropy(probs)
-
-# def gini(vec):
-#     sorted_vec = np.sort(vec)
-#     cumsum = np.cumsum(sorted_vec)
-#     return 1 - 2 * np.sum((cumsum - sorted_vec/2) / cumsum[-1]) / len(vec)
-
-def gini(vec):
-    n: int = len(vec)
-    diffs = np.abs(np.subtract.outer(vec, vec)).mean()
-    return np.sum(diffs) / (2 * n**2 * np.mean(vec))
-
-def hoyer(vec):
-    return np.linalg.norm(vec, 1) / np.linalg.norm(vec, 2)
-
-def hoyer_square(vec):
-    vec_squared = np.array(vec) ** 2
-    return np.linalg.norm(vec_squared, 1) / np.linalg.norm(vec_squared, 2)
-
-def spectral_entropy(signal_data, sf, nperseg=None, normalize=True):
-    signal_data = np.array(signal_data)
-
-    if nperseg is None:
-        nperseg = int(sf * 2)
-    
-    frequencies, psd = signal.welch(signal_data, sf, nperseg=nperseg)
-    
-    psd_norm = psd / psd.sum()
-    
-    spec_ent = -np.sum(psd_norm * np.log2(psd_norm + np.finfo(float).eps))
-    
-    if normalize:
-        spec_ent /= np.log2(len(psd_norm))
-    
-    return spec_ent
 
 
 def get_args():
@@ -114,7 +61,6 @@ def main():
 
         config = cached_data['config']
         config = assert_type(TransformerConfig, config)
-        p = config.d_vocab - 1
 
         dataset = cached_data['dataset']
         labels = cached_data['labels']
@@ -128,7 +74,7 @@ def main():
         test_data = dataset[test_indices]
         test_labels = labels[test_indices]
         
-        # SAEs like multiple epochs
+        # SAEs get lower FVU on multiple epochs
         num_epochs = 128
         sae_train_dataset = HfDataset.from_dict({
             "input_ids": train_data.repeat(num_epochs, 1),
@@ -136,26 +82,22 @@ def main():
         })
         sae_train_dataset.set_format(type="torch", columns=["input_ids", "labels"])
         
-        # Create smaller patching dataset
+        # Subset of data to collect eval metrics
         len_sample_data = 4 if args.debug else 40
 
         model = CustomTransformer(config)
 
-
-        # NNSight requires a tokenizer, we are passing in tensors so any tokenizer will do
+        # NNSight requires a tokenizer. We are passing in tensors so any tokenizer will do
         tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
         for epoch, state_dict in tqdm(list(zip(checkpoint_epochs, model_checkpoints))):
-            model.load_state_dict(state_dict)
-            model.to(device) # type: ignore
-
             if epoch not in checkpoint_data:
                 checkpoint_data[epoch] = {}
-            checkpoint_data[epoch]['parameter_norm'] = torch.cat([parameters.flatten() for parameters in model.parameters()]).flatten().norm(p=2).item()
-            checkpoint_data[epoch]['train_loss'] = F.cross_entropy(model(train_data[:len_sample_data].to(device)).logits.to(torch.float64)[:, -1], train_labels[:len_sample_data].to(device)).mean().item()
-            checkpoint_data[epoch]['test_loss'] = F.cross_entropy(model(test_data[:len_sample_data].to(device)).logits.to(torch.float64)[:, -1], test_labels[:len_sample_data].to(device)).mean().item()
 
+            # Load model and SAEs
+            model.load_state_dict(state_dict)
+            model.to(device) # type: ignore
             nnsight_model = LanguageModel(model, tokenizer=tokenizer)
 
             sae_path = Path(f"sae/{run_identifier}{'_' + args.sae_name if args.sae_name else ''}/grok.{epoch}")
@@ -189,6 +131,11 @@ def main():
                 )
             all_submods = [submod for layer_submods in zip(attns, mlps) for submod in layer_submods]
 
+            # Collect metrics
+            checkpoint_data[epoch]['parameter_norm'] = torch.cat([parameters.flatten() for parameters in model.parameters()]).flatten().norm(p=2).item()
+            checkpoint_data[epoch]['train_loss'] = F.cross_entropy(model(train_data[:len_sample_data].to(device)).logits.to(torch.float64)[:, -1], train_labels[:len_sample_data].to(device)).mean().item()
+            checkpoint_data[epoch]['test_loss'] = F.cross_entropy(model(test_data[:len_sample_data].to(device)).logits.to(torch.float64)[:, -1], test_labels[:len_sample_data].to(device)).mean().item()
+
             nodes, fvu, multi_topk_fvu = get_mean_sae_entropy(
                 nnsight_model, all_submods, dictionaries, 
                 train_data, aggregate=True, batch_size=64
@@ -213,25 +160,27 @@ def main():
     checkpoint_data = torch.load(OUT_PATH)
 
     def add_scores_if_exists(fig, key: str, score_type: str | None, name: str, normalize: bool = True):
-        if score_type and score_type not in checkpoint_data[checkpoint_epochs[0]].keys():
-            print(f"Skipping {name} because {score_type} does not exist in the checkpoint")
-            return
+        # Check whether data exists
+        first_epoch_data = checkpoint_data[checkpoint_epochs[0]]
+        if score_type:
+            if score_type not in first_epoch_data.keys():
+                print(f"Skipping {name} because {score_type} does not exist in the checkpoint")
+                return
+            first_epoch_data = first_epoch_data[score_type]
 
-        if (score_type and key not in checkpoint_data[checkpoint_epochs[0]][score_type].keys()) or (
-            not score_type and key not in checkpoint_data[checkpoint_epochs[0]].keys()
-        ):
+        if key not in first_epoch_data.keys():
             print(f"Skipping {name} because it does not exist in the checkpoint")
             return
         
-
+        # Plot data
         scores = (
             [scores[score_type][key] for scores in list(checkpoint_data.values())[:test_early_index]]
             if score_type
             else [scores[key] for scores in list(checkpoint_data.values())[:test_early_index]]
         )
 
+        # Normalize scores to be between 0 and 1
         if normalize:
-            # Normalize scores to be between 0 and 1
             max_score = max(scores)
             min_score = min(scores)
             scores = [(score - min_score) / (max_score - min_score) for score in scores]
@@ -253,7 +202,7 @@ def main():
     add_scores_if_exists(fig, 'sae_multi_topk_fvu', None, 'SAE Multi Top-K FVU')
 
     fig.update_layout(
-        title=f"Grokking Loss and Node Entropy over Epochs for seed {run_identifier}", 
+        title=f"Grokking Loss and Node Entropy over Epochs for {run_identifier}", 
         xaxis_title="Epoch", 
         yaxis_title="Loss",
         width=1000

@@ -1,3 +1,7 @@
+# Initial modular addition experiments using many kinds of patching
+# And both residual and SAE node scores
+# Kept for reference
+
 import os
 from typing import Any
 import heapq
@@ -24,6 +28,7 @@ from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy, ge
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.feature_circuits.patch_nodes import patch_nodes
 from ngrams_across_time.grok.transformers import CustomTransformer, TransformerConfig
+from ngrams_across_time.grok.metrics import hoyer, hoyer_square, gini
 
 
 lt.monkey_patch()
@@ -122,62 +127,6 @@ def abs_score_entropy(nodes):
     probs = np.array([score / sum_scores for score in scores])
     return stats.entropy(probs)
 
-def gini(vec):
-    sorted_vec = np.sort(vec)
-    cumsum = np.cumsum(sorted_vec)
-    return 1 - 2 * np.sum((cumsum - sorted_vec/2) / cumsum[-1]) / len(vec)
-
-def hoyer(vec):
-    return np.linalg.norm(vec, 1) / np.linalg.norm(vec, 2)
-
-
-def hoyer_square(vec):
-    vec_squared = np.array(vec) ** 2
-    return np.linalg.norm(vec_squared, 1) / np.linalg.norm(vec_squared, 2)
-
-
-def spectral_entropy(signal_data, sf, nperseg=None, normalize=True):
-    """
-    Calculate spectral entropy of a time series signal.
-    
-    Parameters:
-    -----------
-    signal_data : array-like
-        Input signal - time series data
-    sf : float
-        Sampling frequency of the signal
-    nperseg : int, optional
-        Length of each segment for Welch's method
-        If None, defaults to sf*2 (2 second windows)
-    normalize : bool, optional
-        If True, entropy is normalized by log2(n_freq_bins)
-    
-    Returns:
-    --------
-    float
-        Spectral entropy value
-    dict
-        Additional information including PSD and frequencies
-    """
-    # Input validation
-    signal_data = np.array(signal_data)
-    if signal_data.size == 0:
-        raise ValueError("Input signal is empty")
-    
-    # Set default nperseg if not specified
-    if nperseg is None:
-        nperseg = int(sf * 2)
-    
-    frequencies, psd = signal.welch(signal_data, sf, nperseg=nperseg)
-    
-    psd_norm = psd / psd.sum()
-    
-    spec_ent = -np.sum(psd_norm * np.log2(psd_norm + np.finfo(float).eps))
-    
-    if normalize:
-        spec_ent /= np.log2(len(psd_norm))
-    
-    return spec_ent
 
 
 def min_nodes_to_random(node_scores, node_type, train_data, patch_data, language_model, all_submods, metric_fn, dictionaries):

@@ -21,8 +21,8 @@ from torch.utils.data import DataLoader
 import nnsight
 
 from ngrams_across_time.utils.utils import assert_type, set_seeds
-from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square
-from ngrams_across_time.grok.inference.pythia import all_node_scores, abs_score_entropy
+from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square, abs_score_entropy
+from ngrams_across_time.grok.inference.pythia import all_node_scores
 from ngrams_across_time.feature_circuits.dense_act import to_dense
 
 @torch.no_grad()
@@ -333,6 +333,7 @@ def main():
                 train_dataloader, aggregate=True, input_key='input_ids', # mean=False, 
                 num_patches=num_patches
             )
+            mean_node_scores = all_node_scores(mean_nodes)
 
             mean_fvu = np.mean([v for v in fvu.values()])
             mean_multi_topk_fvu = np.mean([v for v in multi_topk_fvu.values()])
@@ -344,9 +345,7 @@ def main():
             checkpoint_data[epoch][f'sae_fvu'] = mean_fvu
             checkpoint_data[epoch][f'sae_multi_topk_fvu'] = mean_multi_topk_fvu
 
-            checkpoint_data[epoch][f'sae_entropy'] = abs_score_entropy(mean_nodes)
-
-            mean_node_scores = all_node_scores(mean_nodes)
+            checkpoint_data[epoch][f'sae_entropy'] = abs_score_entropy(mean_node_scores)
             checkpoint_data[epoch][f'hoyer'] = hoyer(mean_node_scores)
             checkpoint_data[epoch][f'hoyer_square'] = hoyer_square(mean_node_scores)
             checkpoint_data[epoch][f'gini'] = gini(mean_node_scores)
@@ -366,9 +365,9 @@ def main():
             checkpoint_data[epoch]['test_sae_entropy_nodes'] = {'nodes': test_nodes}   
 
             mean_test_nodes = {k: v.mean(dim=0) for k, v in test_nodes.items()}
-            checkpoint_data[epoch]['test_sae_entropy'] = abs_score_entropy(mean_test_nodes)
-
             mean_test_node_scores = all_node_scores(mean_test_nodes)
+
+            checkpoint_data[epoch]['test_sae_entropy'] = abs_score_entropy(mean_test_node_scores)
             checkpoint_data[epoch]['test_hoyer'] = hoyer(mean_test_node_scores)
             checkpoint_data[epoch]['test_hoyer_square'] = hoyer_square(mean_test_node_scores)
             checkpoint_data[epoch]['test_gini'] = gini(mean_test_node_scores)

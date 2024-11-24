@@ -28,7 +28,7 @@ from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy, ge
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.feature_circuits.patch_nodes import patch_nodes
 from ngrams_across_time.grok.transformers import CustomTransformer, TransformerConfig
-from ngrams_across_time.grok.metrics import hoyer, hoyer_square, gini
+from ngrams_across_time.grok.metrics import hoyer, hoyer_square, gini, abs_score_entropy
 
 
 lt.monkey_patch()
@@ -118,15 +118,6 @@ def all_node_scores(checkpoint_scores) -> list[float]:
             else:
                 scores.extend(values.act.flatten().tolist())
         return scores
-
-
-def abs_score_entropy(nodes):
-    scores = [abs(score) for score in all_node_scores(nodes)]
-    sum_scores = sum(scores)
-
-    probs = np.array([score / sum_scores for score in scores])
-    return stats.entropy(probs)
-
 
 
 def min_nodes_to_random(node_scores, node_type, train_data, patch_data, language_model, all_submods, metric_fn, dictionaries):
@@ -291,9 +282,11 @@ def main():
             checkpoint_data[epoch][f'sae_multi_topk_fvu'] = mean_multi_topk_fvu
             checkpoint_data[epoch][f'sae_entropy_nodes'] = {'nodes': nodes}   
 
-            checkpoint_data[epoch][f'sae_entropy'] = abs_score_entropy(nodes)
-
             node_scores = all_node_scores(nodes)
+
+            checkpoint_data[epoch][f'sae_entropy'] = abs_score_entropy(node_scores)
+
+            
             checkpoint_data[epoch][f'hoyer'] = hoyer(node_scores)
             checkpoint_data[epoch][f'hoyer_square'] = hoyer_square(node_scores)
             checkpoint_data[epoch][f'gini'] = gini(node_scores)
@@ -338,10 +331,11 @@ def main():
                     'sae_grad_zero', 'sae_ig_patch', 'residual_ig_patch', 'sae_attrib_patch', 'residual_attrib_patch'
                 ]:
                 nodes = checkpoint_data[epoch][node_score_type]['nodes']
+                node_scores = all_node_scores(nodes)
                 
                 # 1. Entropy measure
                 # 2. Linearized approximation of number of nodes to ablate to achieve random accuracy
-                checkpoint_data[epoch][node_score_type]['entropy'] = abs_score_entropy(nodes)
+                checkpoint_data[epoch][node_score_type]['entropy'] = abs_score_entropy(node_scores)
 
                 scores = all_node_scores(nodes)
                 sorted_scores = np.sort(scores)[::-1]

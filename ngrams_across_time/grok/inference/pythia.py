@@ -22,7 +22,7 @@ import lovely_tensors as lt
 from sae.data import MemmapDataset
 from torch.utils.data import DataLoader
 
-from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square
+from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square, abs_score_entropy
 from ngrams_across_time.feature_circuits.dense_act import to_dense
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.language.hf_client import get_model_checkpoints
@@ -105,7 +105,6 @@ def get_sae_acts(
     return nodes, fvu, multi_topk_fvu
 
 
-
 def compute_losses(model, dataloader, device):
     model.eval()
     total_loss = 0
@@ -118,9 +117,8 @@ def compute_losses(model, dataloader, device):
             inputs = batch[:, :-1]
             targets = batch[:, 1:]
             
-            outputs = model(inputs, targets)
-            logits = outputs.logits.to(torch.float64)
-            
+            logits = model(inputs, targets).logits
+
             logits = logits.reshape(-1, logits.size(-1))
             targets = targets.reshape(-1)
             
@@ -130,7 +128,7 @@ def compute_losses(model, dataloader, device):
     
     return total_loss / num_batches
 
-def all_node_scores(checkpoint_scores) -> list[float]:
+def all_node_scores(checkpoint_scores) -> np.ndarray:
         scores = []
         for node, values in checkpoint_scores.items():
             if node == 'y':
@@ -139,14 +137,7 @@ def all_node_scores(checkpoint_scores) -> list[float]:
                 scores.extend(values.flatten().tolist())
             else:
                 scores.extend(values.act.flatten().tolist())
-        return scores
-
-def abs_score_entropy(nodes):
-    scores = [abs(score) for score in all_node_scores(nodes)]
-    sum_scores = sum(scores)
-
-    probs = np.array([score / sum_scores for score in scores])
-    return stats.entropy(probs)
+        return np.array(scores)
 
 
 def get_args():
@@ -271,9 +262,9 @@ def main():
             checkpoint_data[step_number][f'sae_entropy_nodes'] = {'nodes': nodes}   
 
             mean_nodes = {k: v.mean(dim=0) for k, v in nodes.items()}
-            checkpoint_data[step_number][f'sae_entropy'] = abs_score_entropy(mean_nodes)
-
             mean_node_scores = all_node_scores(mean_nodes)
+
+            checkpoint_data[step_number][f'sae_entropy'] = abs_score_entropy(mean_node_scores)
             checkpoint_data[step_number][f'hoyer'] = hoyer(mean_node_scores)
             checkpoint_data[step_number][f'hoyer_square'] = hoyer_square(mean_node_scores)
             checkpoint_data[step_number][f'gini'] = gini(mean_node_scores)

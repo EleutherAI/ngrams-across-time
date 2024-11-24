@@ -17,8 +17,8 @@ import lovely_tensors as lt
 from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.grok.transformers import CustomTransformer, TransformerConfig
-from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square
-from ngrams_across_time.grok.inference.pythia import all_node_scores, abs_score_entropy
+from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square, abs_score_entropy
+from ngrams_across_time.grok.inference.pythia import all_node_scores, 
 
 lt.monkey_patch()
 set_seeds(598)
@@ -147,9 +147,10 @@ def main():
             checkpoint_data[epoch][f'sae_multi_topk_fvu'] = mean_multi_topk_fvu
             checkpoint_data[epoch][f'sae_entropy_nodes'] = {'nodes': nodes}   
 
-            checkpoint_data[epoch][f'sae_entropy'] = abs_score_entropy(nodes)
-
             node_scores = all_node_scores(nodes)
+
+            # Sparsity metrics
+            checkpoint_data[epoch][f'sae_entropy'] = abs_score_entropy(node_scores)
             checkpoint_data[epoch][f'hoyer'] = hoyer(node_scores)
             checkpoint_data[epoch][f'hoyer_square'] = hoyer_square(node_scores)
             checkpoint_data[epoch][f'gini'] = gini(node_scores)

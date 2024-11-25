@@ -1,7 +1,8 @@
 import os
 from argparse import ArgumentParser
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Any
+
 from collections import defaultdict
 from plotly.subplots import make_subplots
 import torch.nn.functional as F
@@ -22,8 +23,7 @@ from torch.utils.data import DataLoader
 import nnsight
 
 from ngrams_across_time.utils.utils import assert_type, set_seeds
-from ngrams_across_time.grok.metrics import gini, hoyer, hoyer_square, abs_score_entropy
-from ngrams_across_time.grok.inference.pythia import concatenate_values
+from ngrams_across_time.clearnets.metrics import gini, hoyer, hoyer_square, abs_score_entropy
 
 import plotly.io as pio
 
@@ -42,15 +42,24 @@ def to_dense(top_acts, top_indices, num_latents: int):
     return dense_empty.scatter(-1, top_indices.long(), top_acts)
 
 
+def concatenate_values(dictionary: dict[Any, Tensor]) -> np.ndarray:
+    scores = []
+    for values in dictionary.values():
+        scores.extend(values.flatten().tolist())
+        
+    return np.array(scores)
+
+
+# TODO check this still works for mnist (works for pythia)
 @torch.no_grad()
 def get_sae_acts(
         model,
         ordered_submods: list,
         dictionaries,
         dataloader,
-        num_patches: int,
+        # for VIT this is equal to the number of patches
+        seq_len: int | None,
         aggregate: bool = True, # or 'none' for not aggregating across sequence position
-        # mean: bool = True,
         device: str | torch.device = torch.device("cuda"),
         input_key: str = 'input_ids',
         act_callback: Callable | None = None
@@ -62,20 +71,22 @@ def get_sae_acts(
     first_batch = next(iter(dataloader))
     batch_size = first_batch[input_key].shape[0]
     accumulated_nodes = {}
-    with torch.amp.autocast(str(device)):
-        with model.trace(first_batch[input_key].to(device)):
-            for submodule in ordered_submods:
-                output = (
-                    submodule.nns_output 
-                    if hasattr(submodule, 'nns_output') 
-                    else submodule.output
-                )
-                is_tuple[submodule] = isinstance(output, tuple) 
+    # with torch.amp.autocast(str(device)):
+    with model.scan(first_batch[input_key].to(device)) as tracer:
+        for submodule in ordered_submods:
+            output = (
+                submodule.nns_output 
+                if hasattr(submodule, 'nns_output') 
+                else submodule.output
+            )
+            # #isinstance(output, tuple) doesn't work with pythia call
+            is_tuple[submodule] = type(output.shape) == tuple 
 
-                num_latents = dictionaries[submodule].num_latents
-                shape = (batch_size, num_latents) if aggregate else (batch_size, num_patches, num_latents)
-                accumulated_nodes[submodule.path] = torch.zeros(shape, dtype=first_batch[input_key].dtype).save()
-
+    with model.trace(first_batch[input_key].to(device)) as tracer:
+        for submodule in ordered_submods:
+            num_latents = dictionaries[submodule].num_latents
+            shape = (batch_size, num_latents) if aggregate or seq_len is None else (batch_size, seq_len, num_latents)
+            accumulated_nodes[submodule.path] = torch.zeros(shape, dtype=first_batch[input_key].dtype).save()
 
     # Do inference
     total_samples = 0
@@ -90,7 +101,7 @@ def get_sae_acts(
             batch_fvus = {}
             batch_multi_topk_fvus = {}
             
-            with model.trace(batch[input_key].to(device)):
+            with model.trace(batch[input_key].to(device)) as tracer:
                 for submodule in ordered_submods:
                     num_latents = dictionaries[submodule].num_latents
 
@@ -298,7 +309,7 @@ def inference(model_path: Path, out_path: Path, sae_path: Path, args):
         mean_nodes, fvu, multi_topk_fvu, metrics = get_sae_acts(
             nnsight_model, all_submods, dictionaries, 
             train_dataloader, aggregate=True, input_key='input_ids', # mean=False, 
-            num_patches=num_patches, act_callback=running_means
+            seq_len=num_patches, act_callback=running_means
         )
         mean_node_scores = concatenate_values(mean_nodes)
 
@@ -323,7 +334,7 @@ def inference(model_path: Path, out_path: Path, sae_path: Path, args):
 
         test_nodes, test_fvu, test_multi_topk_fvu, metrics = get_sae_acts(
             nnsight_model, all_submods, dictionaries, 
-            train_dataloader, aggregate=True, num_patches=num_patches, act_callback=running_means # mean=False, 
+            train_dataloader, aggregate=True, seq_len=num_patches, act_callback=running_means # mean=False, 
         )
         checkpoint_data[epoch]['test_sae_fvu'] = np.mean([v for v in test_fvu.values()])
         checkpoint_data[epoch]['test_sae_multi_topk_fvu'] = np.mean([v for v in test_multi_topk_fvu.values()])

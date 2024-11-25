@@ -1,0 +1,64 @@
+
+import time
+import numpy as np
+from numpy import ndarray
+import torch
+from torch import Tensor
+from scipy import stats
+from scipy.optimize import linear_sum_assignment
+
+def mean_l2(tensor: Tensor) -> float:
+    return torch.linalg.vector_norm(tensor, ord=2, dim=1).mean().item()
+
+def var_trace(tensor: Tensor) -> float:
+    return tensor.var(dim=1).sum().item()
+
+def abs_score_entropy(vec: ndarray):
+    abs_vec = np.abs(vec)
+    sum_scores = abs_vec.sum()
+    probs = abs_vec / sum_scores
+
+    return stats.entropy(probs)
+
+def gini(vec: ndarray):
+    n = len(vec)
+    diffs = np.abs(np.subtract.outer(vec, vec)).mean()
+
+    return np.sum(diffs) / (2 * n**2 * np.mean(vec))
+
+def hoyer(vec: ndarray):
+    l1 = np.linalg.norm(vec, 1)
+    l2 = np.linalg.norm(vec, 2)
+
+    return l1 / l2
+
+def hoyer_square(vec: ndarray):
+    return hoyer(vec ** 2)
+
+
+def mean_matched_cosine_similarity(first: ndarray, second: ndarray) -> float:
+    """
+    Match vectors between two matrices using linear sum assignment with a cosine distance cost,
+    then return the mean similarity across all matched pairs.
+    
+    Parameters:
+    first: numpy array of shape (n, d) where n is number of vectors and d is the dimension
+    second: numpy array of shape (m, d) where m is number of vectors and d is the dimension
+    
+    Returns:
+    matches: list of tuples containing (first_index, second_index, similarity) for matched pairs
+    """
+    start = time.time()
+
+    first_normalized = first / np.linalg.norm(first, axis=1)[:, np.newaxis]
+    second_normalized = second / np.linalg.norm(second, axis=1)[:, np.newaxis]
+    
+    # Set cost to cosine distance between each pair of elements
+    cost_matrix = 1 - np.dot(first_normalized, second_normalized.T)
+
+    # Match elements using linear sum assignment to minimize cost
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    
+    print(f"Linear summ assignment complete (time elapsed: {time.time() - start}).")
+
+    return 1 - cost_matrix[row_ind, col_ind].mean()

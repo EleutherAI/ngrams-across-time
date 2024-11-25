@@ -1,7 +1,7 @@
-import os
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import Any
+from collections import defaultdict
 
 from plotly.subplots import make_subplots
 import torch.nn.functional as F
@@ -11,8 +11,6 @@ import numpy as np
 from torch import Tensor
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-import nnsight
-from nnsight.intervention import InterventionProxy
 from nnsight import LanguageModel
 from sae import Sae
 import plotly.graph_objects as go
@@ -21,9 +19,9 @@ from sae.data import MemmapDataset
 from torch.utils.data import DataLoader
 
 from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square, abs_score_entropy
-from ngrams_across_time.feature_circuits.dense_act import to_dense
 from ngrams_across_time.utils.utils import set_seeds
 from ngrams_across_time.language.hf_client import get_model_checkpoints
+from ngrams_across_time.grok.inference.mnist_vit import get_sae_acts, concatenate_values
 
 import plotly.io as pio
 
@@ -32,82 +30,82 @@ lt.monkey_patch()
 set_seeds(598)
 device = torch.device("cuda")
 
-@torch.no_grad()
+# @torch.no_grad()
 # TODO enable non-aggregated nodes across batches
 # TODO use version in mnist_vit
-def get_sae_acts(
-        model,
-        ordered_submods: list,
-        dictionaries,
-        dataloader,
-        aggregate: bool = True, # across sequence positions
-        mean: bool = True, # across batches
-        device: str | t.device = t.device("cuda"),
-        input_key: str = 'input_ids',
-):
-    # Collect metadata
-    batch_size = 0
-    seq_len = 0
-    is_tuple = {}
-    with torch.amp.autocast(str(device)):  # Enable automatic mixed precision
-        for batch in dataloader:
-            with model.scan(batch[input_key].to(device)):
-                batch_size = batch[input_key].shape[0]
-                seq_len = batch[input_key].shape[1]
-                for submodule in ordered_submods:
-                    is_tuple[submodule] = isinstance(submodule.output.shape, tuple) 
-            break
+# def get_sae_acts(
+#         model,
+#         ordered_submods: list,
+#         dictionaries,
+#         dataloader,
+#         aggregate: bool = True, # across sequence positions
+#         mean: bool = True, # across batches
+#         device: str | t.device = t.device("cuda"),
+#         input_key: str = 'input_ids',
+# ):
+#     # Collect metadata
+#     batch_size = 0
+#     seq_len = 0
+#     is_tuple = {}
+#     with torch.amp.autocast(str(device)):  # Enable automatic mixed precision
+#         for batch in dataloader:
+#             with model.scan(batch[input_key].to(device)):
+#                 batch_size = batch[input_key].shape[0]
+#                 seq_len = batch[input_key].shape[1]
+#                 for submodule in ordered_submods:
+#                     is_tuple[submodule] = isinstance(submodule.output.shape, tuple) 
+#             break
 
-    # Prepare data structures
-    accumulated_nodes = {}
-    accumulated_fvu = {}
-    accumulated_multi_topk_fvu = {}
-    for submodule in ordered_submods:
-        num_latents = dictionaries[submodule].num_latents
-        shape = (batch_size, num_latents) if aggregate else (batch_size, seq_len, num_latents)
+#     # Prepare data structures
+#     accumulated_nodes = {}
+#     accumulated_fvu = {}
+#     accumulated_multi_topk_fvu = {}
+#     for submodule in ordered_submods:
+#         num_latents = dictionaries[submodule].num_latents
+#         shape = (batch_size, num_latents) if aggregate else (batch_size, seq_len, num_latents)
         
-        accumulated_nodes[submodule.path] = torch.zeros(shape)
-        accumulated_fvu[submodule.path] = 0
-        accumulated_multi_topk_fvu[submodule.path] = 0
+#         accumulated_nodes[submodule.path] = torch.zeros(shape)
+#         accumulated_fvu[submodule.path] = 0
+#         accumulated_multi_topk_fvu[submodule.path] = 0
 
-    # Do inference
-    total_samples = 0
-    for batch in dataloader:
-        batch_nodes = {}
-        batch_fvus = {}
-        batch_multi_topk_fvus = {}
+#     # Do inference
+#     total_samples = 0
+#     for batch in dataloader:
+#         batch_nodes = {}
+#         batch_fvus = {}
+#         batch_multi_topk_fvus = {}
         
-        with model.trace(batch[input_key].to(device)):
-            for submodule in ordered_submods:
-                input = submodule.output if not is_tuple[submodule] else submodule.output[0]
+#         with model.trace(batch[input_key].to(device)):
+#             for submodule in ordered_submods:
+#                 input = submodule.output if not is_tuple[submodule] else submodule.output[0]
 
-                dictionary = dictionaries[submodule]
-                flat_f: InterventionProxy = nnsight.apply(dictionary.forward, input.flatten(0, 1))
-                batch_fvus[submodule.path] = flat_f.fvu.cpu().save()
-                batch_multi_topk_fvus[submodule.path] = flat_f.multi_topk_fvu.cpu().save()
-                latent_acts = flat_f.latent_acts.view(input.shape[0], input.shape[1], -1)
-                latent_indices = flat_f.latent_indices.view(input.shape[0], input.shape[1], -1)
-                dense = to_dense(latent_acts, latent_indices, num_latents)
-                batch_nodes[submodule.path] = dense.cpu().save()
+#                 dictionary = dictionaries[submodule]
+#                 flat_f: InterventionProxy = nnsight.apply(dictionary.forward, input.flatten(0, 1))
+#                 batch_fvus[submodule.path] = flat_f.fvu.cpu().save()
+#                 batch_multi_topk_fvus[submodule.path] = flat_f.multi_topk_fvu.cpu().save()
+#                 latent_acts = flat_f.latent_acts.view(input.shape[0], input.shape[1], -1)
+#                 latent_indices = flat_f.latent_indices.view(input.shape[0], input.shape[1], -1)
+#                 dense = to_dense(latent_acts, latent_indices, num_latents)
+#                 batch_nodes[submodule.path] = dense.cpu().save()
         
-        if aggregate:
-            batch_nodes = {k: v.sum(dim=1) for k, v in batch_nodes.items()}
+#         if aggregate:
+#             batch_nodes = {k: v.sum(dim=1) for k, v in batch_nodes.items()}
         
-        for submodule in ordered_submods:
-            accumulated_nodes[submodule.path] += batch_nodes[submodule.path] * batch_size
-            accumulated_fvu[submodule.path] += batch_fvus[submodule.path].item() * batch_size
-            accumulated_multi_topk_fvu[submodule.path] += batch_multi_topk_fvus[submodule.path].item() * batch_size
+#         for submodule in ordered_submods:
+#             accumulated_nodes[submodule.path] += batch_nodes[submodule.path] * batch_size
+#             accumulated_fvu[submodule.path] += batch_fvus[submodule.path].item() * batch_size
+#             accumulated_multi_topk_fvu[submodule.path] += batch_multi_topk_fvus[submodule.path].item() * batch_size
 
-        total_samples += batch_size
+#         total_samples += batch_size
 
-    nodes = {k: v / total_samples for k, v in accumulated_nodes.items()}
-    fvu = {k: v / total_samples for k, v in accumulated_fvu.items()}
-    multi_topk_fvu = {k: v / total_samples for k, v in accumulated_multi_topk_fvu.items()}
+#     nodes = {k: v / total_samples for k, v in accumulated_nodes.items()}
+#     fvu = {k: v / total_samples for k, v in accumulated_fvu.items()}
+#     multi_topk_fvu = {k: v / total_samples for k, v in accumulated_multi_topk_fvu.items()}
 
-    if mean:
-        nodes = {k: v.mean(dim=0) for k, v in nodes.items()}
+#     if mean:
+#         nodes = {k: v.mean(dim=0) for k, v in nodes.items()}
     
-    return nodes, fvu, multi_topk_fvu
+#     return nodes, fvu, multi_topk_fvu
 
 
 def compute_losses(model, dataloader, device):
@@ -134,12 +132,6 @@ def compute_losses(model, dataloader, device):
     return total_loss / num_batches
 
 
-def concatenate_values(dictionary: dict[Any, Tensor]) -> np.ndarray:
-    scores = []
-    for values in dictionary.values():
-        scores.extend(values.flatten().tolist())
-        
-    return np.array(scores)
 
 
 def get_args():
@@ -224,33 +216,33 @@ def main():
 
             nnsight_dataloader = DataLoader(data.select(range(len_sample_data)), batch_size=batch_size, drop_last=True)
 
-            nodes, fvu, multi_topk_fvu = get_sae_acts(
+            def running_means(acts: Tensor, accumulator: defaultdict):
+                accumulator['mean_l2'] += torch.linalg.vector_norm(acts, ord=2, dim=1).mean() / acts.shape[0]
+                accumulator['var_trace'] += acts.var(dim=1).sum() / acts.shape[0]
+                return accumulator
+            
+            # Mean across batches
+            nodes, fvu, multi_topk_fvu, metrics = get_sae_acts(
                 nnsight_model, all_submods, dictionaries, 
-                nnsight_dataloader, aggregate=False, mean=False
+                nnsight_dataloader, seq_len=2049, aggregate=False, act_callback=running_means
             )
 
             checkpoint_data[step_number][f'sae_fvu'] = np.mean(list(fvu.values()))
             checkpoint_data[step_number][f'sae_multi_topk_fvu'] = np.mean(
                 list(multi_topk_fvu.values())
             )
-            checkpoint_data[step_number][f'sae_entropy_nodes'] = {'nodes': nodes}
-               
+
             mean_nodes = {k: v.mean(dim=0) for k, v in nodes.items()}
+            checkpoint_data[step_number][f'mean_nodes'] = mean_nodes
+               
             mean_node_scores = concatenate_values(mean_nodes)
 
             checkpoint_data[step_number][f'sae_entropy'] = abs_score_entropy(mean_node_scores)
             checkpoint_data[step_number][f'hoyer'] = hoyer(mean_node_scores)
             checkpoint_data[step_number][f'hoyer_square'] = hoyer_square(mean_node_scores)
             checkpoint_data[step_number][f'gini'] = gini(mean_node_scores)
-
-            # TODO add unaggregated nodes
-            node_scores = concatenate_values(nodes)
-            breakpoint()
-            checkpoint_data[step_number]['mean_l2'] = mean_l2(torch.tensor(node_scores))
-            checkpoint_data[step_number]['var_trace'] = var_trace(torch.tensor(node_scores))
-
-            exit(0)
-            torch.save(checkpoint_data, OUT_PATH)
+            checkpoint_data[step_number]['mean_l2'] = metrics['mean_l2']
+            checkpoint_data[step_number]['var_trace'] = metrics['var_trace']
 
             # Print all metrics
             print(f"Step {step_number}:")
@@ -266,7 +258,7 @@ def main():
             print(f"Mean L2: {checkpoint_data[step_number]['mean_l2']}")
             print(f"Var Trace: {checkpoint_data[step_number]['var_trace']}")
 
-            # TODO add var entropy
+            torch.save(checkpoint_data, OUT_PATH)
 
         torch.save(checkpoint_data, OUT_PATH)
         

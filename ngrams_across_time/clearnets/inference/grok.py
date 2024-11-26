@@ -15,9 +15,9 @@ import lovely_tensors as lt
 
 from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy
 from ngrams_across_time.utils.utils import assert_type, set_seeds
-from ngrams_across_time.grok.transformers import CustomTransformer, TransformerConfig
-from ngrams_across_time.grok.metrics import gini, hoyer, hoyer_square, abs_score_entropy
-from ngrams_across_time.grok.inference.pythia import concatenate_values
+from ngrams_across_time.clearnets.transformers import CustomTransformer, TransformerConfig
+from ngrams_across_time.clearnets.metrics import gini, hoyer, hoyer_square, abs_score_entropy
+from ngrams_across_time.clearnets.inference.pythia import concatenate_values
 
 import plotly.io as pio
 

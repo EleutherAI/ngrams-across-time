@@ -7,6 +7,7 @@ from torch import Tensor
 from scipy import stats
 from scipy.optimize import linear_sum_assignment
 
+
 def mean_l2(tensor: Tensor) -> float:
     return torch.linalg.vector_norm(tensor, ord=2, dim=1).mean().item()
 
@@ -36,6 +37,29 @@ def hoyer_square(vec: ndarray):
     return hoyer(vec ** 2)
 
 
+def cosine_distance_matched_vectors(first: ndarray, second: ndarray):
+    """
+    Match vectors between two matrices using linear sum assignment with a cosine distance cost.
+    
+    Parameters:
+    first: numpy array of shape (n, d) where n is number of vectors and d is the dimension
+    second: numpy array of shape (m, d) where m is number of vectors and d is the dimension
+    
+    Returns:
+    matches: list of tuples containing (first_index, second_index, similarity) for matched pairs
+    """
+    first_normalized = first / np.linalg.norm(first, axis=1)[:, np.newaxis]
+    second_normalized = second / np.linalg.norm(second, axis=1)[:, np.newaxis]
+    
+    # Set cost to cosine distance between each pair of elements
+    cost_matrix = 1 - np.dot(first_normalized, second_normalized.T)
+
+    # Match elements using linear sum assignment to minimize cost
+    row_idxs, col_idxs = linear_sum_assignment(cost_matrix)
+
+    return row_idxs, col_idxs, cost_matrix[row_idxs, col_idxs]
+
+
 def mean_matched_cosine_similarity(first: ndarray, second: ndarray) -> float:
     """
     Match vectors between two matrices using linear sum assignment with a cosine distance cost,
@@ -46,19 +70,8 @@ def mean_matched_cosine_similarity(first: ndarray, second: ndarray) -> float:
     second: numpy array of shape (m, d) where m is number of vectors and d is the dimension
     
     Returns:
-    matches: list of tuples containing (first_index, second_index, similarity) for matched pairs
+    mean matched cosine similarity: float
     """
-    start = time.time()
-
-    first_normalized = first / np.linalg.norm(first, axis=1)[:, np.newaxis]
-    second_normalized = second / np.linalg.norm(second, axis=1)[:, np.newaxis]
+    row_ind, col_ind, cost_matrix = cosine_distance_matched_vectors(first, second)
     
-    # Set cost to cosine distance between each pair of elements
-    cost_matrix = 1 - np.dot(first_normalized, second_normalized.T)
-
-    # Match elements using linear sum assignment to minimize cost
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    
-    print(f"Linear summ assignment complete (time elapsed: {time.time() - start}).")
-
     return 1 - cost_matrix[row_ind, col_ind].mean()

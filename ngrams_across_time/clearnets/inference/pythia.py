@@ -1,7 +1,6 @@
 from argparse import ArgumentParser
 from pathlib import Path
-from typing import Any
-from collections import defaultdict
+from functools import partial
 
 from plotly.subplots import make_subplots
 import torch.nn.functional as F
@@ -12,16 +11,17 @@ from torch import Tensor
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from nnsight import LanguageModel
-from sae import Sae
+# from sae import Sae
+from sae.sae import Sae
 import plotly.graph_objects as go
 import lovely_tensors as lt
 from sae.data import MemmapDataset
 from torch.utils.data import DataLoader
 
-from ngrams_across_time.grok.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square, abs_score_entropy
+from ngrams_across_time.clearnets.metrics import mean_l2, var_trace, gini, hoyer, hoyer_square, abs_score_entropy
 from ngrams_across_time.utils.utils import set_seeds
 from ngrams_across_time.language.hf_client import get_model_checkpoints
-from ngrams_across_time.grok.inference.mnist_vit import get_sae_acts, concatenate_values
+from ngrams_across_time.clearnets.inference.mnist_vit import get_sae_acts, concatenate_values, batch_metrics
 
 import plotly.io as pio
 
@@ -29,83 +29,6 @@ pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3
 lt.monkey_patch()
 set_seeds(598)
 device = torch.device("cuda")
-
-# @torch.no_grad()
-# TODO enable non-aggregated nodes across batches
-# TODO use version in mnist_vit
-# def get_sae_acts(
-#         model,
-#         ordered_submods: list,
-#         dictionaries,
-#         dataloader,
-#         aggregate: bool = True, # across sequence positions
-#         mean: bool = True, # across batches
-#         device: str | t.device = t.device("cuda"),
-#         input_key: str = 'input_ids',
-# ):
-#     # Collect metadata
-#     batch_size = 0
-#     seq_len = 0
-#     is_tuple = {}
-#     with torch.amp.autocast(str(device)):  # Enable automatic mixed precision
-#         for batch in dataloader:
-#             with model.scan(batch[input_key].to(device)):
-#                 batch_size = batch[input_key].shape[0]
-#                 seq_len = batch[input_key].shape[1]
-#                 for submodule in ordered_submods:
-#                     is_tuple[submodule] = isinstance(submodule.output.shape, tuple) 
-#             break
-
-#     # Prepare data structures
-#     accumulated_nodes = {}
-#     accumulated_fvu = {}
-#     accumulated_multi_topk_fvu = {}
-#     for submodule in ordered_submods:
-#         num_latents = dictionaries[submodule].num_latents
-#         shape = (batch_size, num_latents) if aggregate else (batch_size, seq_len, num_latents)
-        
-#         accumulated_nodes[submodule.path] = torch.zeros(shape)
-#         accumulated_fvu[submodule.path] = 0
-#         accumulated_multi_topk_fvu[submodule.path] = 0
-
-#     # Do inference
-#     total_samples = 0
-#     for batch in dataloader:
-#         batch_nodes = {}
-#         batch_fvus = {}
-#         batch_multi_topk_fvus = {}
-        
-#         with model.trace(batch[input_key].to(device)):
-#             for submodule in ordered_submods:
-#                 input = submodule.output if not is_tuple[submodule] else submodule.output[0]
-
-#                 dictionary = dictionaries[submodule]
-#                 flat_f: InterventionProxy = nnsight.apply(dictionary.forward, input.flatten(0, 1))
-#                 batch_fvus[submodule.path] = flat_f.fvu.cpu().save()
-#                 batch_multi_topk_fvus[submodule.path] = flat_f.multi_topk_fvu.cpu().save()
-#                 latent_acts = flat_f.latent_acts.view(input.shape[0], input.shape[1], -1)
-#                 latent_indices = flat_f.latent_indices.view(input.shape[0], input.shape[1], -1)
-#                 dense = to_dense(latent_acts, latent_indices, num_latents)
-#                 batch_nodes[submodule.path] = dense.cpu().save()
-        
-#         if aggregate:
-#             batch_nodes = {k: v.sum(dim=1) for k, v in batch_nodes.items()}
-        
-#         for submodule in ordered_submods:
-#             accumulated_nodes[submodule.path] += batch_nodes[submodule.path] * batch_size
-#             accumulated_fvu[submodule.path] += batch_fvus[submodule.path].item() * batch_size
-#             accumulated_multi_topk_fvu[submodule.path] += batch_multi_topk_fvus[submodule.path].item() * batch_size
-
-#         total_samples += batch_size
-
-#     nodes = {k: v / total_samples for k, v in accumulated_nodes.items()}
-#     fvu = {k: v / total_samples for k, v in accumulated_fvu.items()}
-#     multi_topk_fvu = {k: v / total_samples for k, v in accumulated_multi_topk_fvu.items()}
-
-#     if mean:
-#         nodes = {k: v.mean(dim=0) for k, v in nodes.items()}
-    
-#     return nodes, fvu, multi_topk_fvu
 
 
 def compute_losses(model, dataloader, device):
@@ -176,7 +99,7 @@ def main():
         for step_number, checkpoint in tqdm(log_checkpoints.items()):
             if step_number not in checkpoint_data:
                 checkpoint_data[step_number] = {}
-            # elif 'gini' in checkpoint_data[step_number]:
+            # elif 'mean_nodes' in checkpoint_data[step_number]:
             #     print(f"Skipping step {step_number} because it already exists")
             #     continue
 
@@ -216,15 +139,12 @@ def main():
 
             nnsight_dataloader = DataLoader(data.select(range(len_sample_data)), batch_size=batch_size, drop_last=True)
 
-            def running_means(acts: Tensor, accumulator: defaultdict):
-                accumulator['mean_l2'] += torch.linalg.vector_norm(acts, ord=2, dim=1).mean() / acts.shape[0]
-                accumulator['var_trace'] += acts.var(dim=1).sum() / acts.shape[0]
-                return accumulator
-            
+            act_callback = partial(batch_metrics, feature_dims=[2], instance_dims=[0, 1])
+
             # Mean across batches
             nodes, fvu, multi_topk_fvu, metrics = get_sae_acts(
                 nnsight_model, all_submods, dictionaries, 
-                nnsight_dataloader, seq_len=2049, aggregate=False, act_callback=running_means
+                nnsight_dataloader, seq_len=2049, aggregate=False, act_callback=act_callback
             )
 
             checkpoint_data[step_number][f'sae_fvu'] = np.mean(list(fvu.values()))
@@ -242,10 +162,15 @@ def main():
             checkpoint_data[step_number][f'hoyer_square'] = hoyer_square(mean_node_scores)
             checkpoint_data[step_number][f'gini'] = gini(mean_node_scores)
             checkpoint_data[step_number]['mean_l2'] = metrics['mean_l2']
+            checkpoint_data[step_number]['var_l2'] = metrics['var_l2']
+            checkpoint_data[step_number]['skew_l2'] = metrics['skew_l2'] 
+            checkpoint_data[step_number]['kurt_l2'] = metrics['kurt_l2']
             checkpoint_data[step_number]['var_trace'] = metrics['var_trace']
+
 
             # Print all metrics
             print(f"Step {step_number}:")
+            print("Mean nodes", checkpoint_data[step_number]['mean_nodes'])
             print(f"Parameter norm: {checkpoint_data[step_number]['parameter_norm']}")
             print(f"Train loss: {checkpoint_data[step_number]['train_loss']}")
             print(f"Test loss: {checkpoint_data[step_number]['test_loss']}")
@@ -257,6 +182,10 @@ def main():
             print(f"Gini coefficient: {checkpoint_data[step_number]['gini']}") 
             print(f"Mean L2: {checkpoint_data[step_number]['mean_l2']}")
             print(f"Var Trace: {checkpoint_data[step_number]['var_trace']}")
+            print(f"Var L2: {checkpoint_data[step_number]['var_l2']}")
+            print(f"Skew L2: {checkpoint_data[step_number]['skew_l2']}")
+            print(f"Kurt L2: {checkpoint_data[step_number]['kurt_l2']}")
+            
 
             torch.save(checkpoint_data, OUT_PATH)
 
@@ -274,6 +203,9 @@ def main():
             return
         
         scores = [scores[key] for scores in list(checkpoint_data.values())[:test_early_index]]
+        if isinstance(scores[0], Tensor):
+            scores = [score.item() for score in scores]
+
         # Normalize scores to be between 0 and 1
         if normalize:
             max_score = max(scores)
@@ -311,8 +243,8 @@ def main():
     add_scores_if_exists(fig, 'sae_entropy', f'H(SAE Nodes)', checkpoint_data, use_secondary_y=True
     )
     fig.update_layout(
-        title=f"Loss and SAE Node Entropy over Epochs (Pythia-160M)", 
-        xaxis_title="Epoch", 
+        title=f"Loss and SAE Node Entropy over Steps (Pythia-160M)", 
+        xaxis_title="Step", 
         yaxis_title="Loss",
         yaxis2_title="Sparsity score",
         width=1000
@@ -326,8 +258,8 @@ def main():
 
     add_scores_if_exists(fig, 'hoyer', 'Hoyer', checkpoint_data, use_secondary_y=True)
     fig.update_layout(
-        title=f"Loss and SAE Hoyer Norm over Epochs (Pythia-160M)", 
-        xaxis_title="Epoch", 
+        title=f"Loss and SAE Hoyer Norm over Steps (Pythia-160M)", 
+        xaxis_title="Step", 
         yaxis_title="Loss",
         yaxis2_title="Sparsity score",
         width=1000
@@ -342,8 +274,8 @@ def main():
 
     add_scores_if_exists(fig, 'gini', 'Gini coefficient', checkpoint_data, use_secondary_y=True)
     fig.update_layout(
-        title=f"Loss and Gini Coefficient of Mean SAE Activations over Epochs (Pythia-160M)", 
-        xaxis_title="Epoch", 
+        title=f"Loss and Gini Coefficient of Mean SAE Activations over Steps (Pythia-160M)", 
+        xaxis_title="Step", 
         yaxis_title="Loss",
         yaxis2_title="Sparsity score",
         width=1000

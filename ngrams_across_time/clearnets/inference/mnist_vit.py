@@ -2,8 +2,9 @@ import os
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import Callable, Any
-
 from collections import defaultdict
+from functools import partial
+
 from plotly.subplots import make_subplots
 import torch.nn.functional as F
 from torchvision import transforms
@@ -14,7 +15,9 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from nnsight import NNsight
 from datasets import load_dataset
-from sae import SaeConfig, Sae, TrainConfig, SaeTrainer
+from sae.config import SaeConfig, TrainConfig
+from sae.sae import Sae
+from sae.trainer import SaeTrainer
 from datasets import Dataset as HfDataset
 import plotly.graph_objects as go
 import lovely_tensors as lt
@@ -28,15 +31,70 @@ from ngrams_across_time.clearnets.metrics import gini, hoyer, hoyer_square, abs_
 import plotly.io as pio
 
 pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3469
-
-
-
 lt.monkey_patch()
 set_seeds(598)
 device = torch.device("cuda")
 
 
-def to_dense(top_acts, top_indices, num_latents: int):
+def compute_losses(model, dataloader: DataLoader, device: torch.device):
+    model.eval()
+    total_loss = 0
+    num_batches = 0
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            inputs = batch['input_ids'].to(device)
+            labels = batch['label'].to(device)
+            
+            outputs = model(inputs)
+
+            logits = outputs.logits.to(torch.float64)
+            logits = logits.reshape(-1, logits.size(-1))
+            
+            loss = F.cross_entropy(logits, labels)
+            total_loss += loss.item()
+            num_batches += 1
+    
+    return total_loss / num_batches
+
+
+# Check what everything represents now this is meaned over a large dataset rather than individual observations over a small dataset
+def batch_metrics(
+    acts: Tensor, 
+    accumulator: defaultdict[str, list], 
+    feature_dims = [2], 
+    instance_dims = [0, 1]
+):
+    if acts.ndim != 2:
+        permuted_dims = instance_dims + feature_dims
+        acts = acts.permute(*permuted_dims)
+        acts = acts.flatten(0, len(instance_dims) - 1)
+        acts = acts.flatten(1, len(feature_dims))
+    
+    l2_norms = torch.norm(acts, dim=1)
+
+    # L2 norm mean
+    accumulator['mean_l2'].append(l2_norms.mean().item())
+    
+    # L2 norm variance
+    accumulator['var_l2'].append(l2_norms.var().item())
+    
+    # L2 norm skewness: E[(X - μ)³] / σ³
+    centered = l2_norms - l2_norms.mean()
+    skew = (centered ** 3).mean() / (l2_norms.std() ** 3)
+    accumulator['skew_l2'].append(skew.item())
+    
+    # L2 norm kurtosis: E[(X - μ)⁴] / σ⁴ - 3 (subtracting 3 gives excess kurtosis)
+    kurt = (centered ** 4).mean() / (l2_norms.var() ** 2) - 3
+    accumulator['kurt_l2'].append(kurt.item())
+
+    # Element-wise variance
+    accumulator['var_trace'].append(torch.trace(torch.cov(acts.T.float())).item())
+
+    return accumulator
+    
+
+def to_dense(top_acts: Tensor, top_indices: Tensor, num_latents: int):
     # In-place scatter seemed to break nnsight
     dense_empty = torch.zeros(top_acts.shape[0], top_acts.shape[1], num_latents, device=top_acts.device, dtype=top_acts.dtype, requires_grad=True)
     return dense_empty.scatter(-1, top_indices.long(), top_acts)
@@ -50,13 +108,12 @@ def concatenate_values(dictionary: dict[Any, Tensor]) -> np.ndarray:
     return np.array(scores)
 
 
-# TODO check this still works for mnist (works for pythia)
 @torch.no_grad()
 def get_sae_acts(
         model,
         ordered_submods: list,
-        dictionaries,
-        dataloader,
+        dictionaries: dict[Any, Sae],
+        dataloader: DataLoader,
         # for VIT this is equal to the number of patches
         seq_len: int | None,
         aggregate: bool = True, # or 'none' for not aggregating across sequence position
@@ -86,14 +143,14 @@ def get_sae_acts(
         for submodule in ordered_submods:
             num_latents = dictionaries[submodule].num_latents
             shape = (batch_size, num_latents) if aggregate or seq_len is None else (batch_size, seq_len, num_latents)
-            accumulated_nodes[submodule.path] = torch.zeros(shape, dtype=first_batch[input_key].dtype).save()
+            accumulated_nodes[submodule.path] = torch.zeros(shape, dtype=torch.float64).save() # type: ignore
 
     # Do inference
     total_samples = 0
     num_batches = 0
     accumulated_fvu = {submodule.path: 0. for submodule in ordered_submods}
     accumulated_multi_topk_fvu = {submodule.path: 0. for submodule in ordered_submods}
-    callback_accumulator = defaultdict(float)
+    callback_accumulator = defaultdict(list)
 
     with torch.amp.autocast(str(device)):
         for batch in dataloader:
@@ -118,14 +175,14 @@ def get_sae_acts(
 
                     latent_acts = flat_f.latent_acts.view(input.shape[0], input.shape[1], -1)
                     latent_indices = flat_f.latent_indices.view(input.shape[0], input.shape[1], -1)
-                    dense = to_dense(latent_acts, latent_indices, num_latents)
-                    batch_nodes[submodule.path] = dense.cpu().save()
+                    dense = to_dense(latent_acts, latent_indices, num_latents) # type: ignore
+                    batch_nodes[submodule.path] = dense.cpu().save() # type: ignore
             
             for submodule in ordered_submods:
                 if aggregate: 
-                    batch_nodes[submodule.path] = batch_nodes[submodule.path].sum(dim=1)
+                    batch_nodes[submodule.path] = batch_nodes[submodule.path].mean(dim=1)
 
-                accumulated_nodes[submodule.path] += batch_nodes[submodule.path]
+                accumulated_nodes[submodule.path] += batch_nodes[submodule.path].double()
                 accumulated_fvu[submodule.path] += batch_fvus[submodule.path].item()
                 accumulated_multi_topk_fvu[submodule.path] += batch_multi_topk_fvus[submodule.path].item()
                 
@@ -142,29 +199,6 @@ def get_sae_acts(
 
 
     return nodes, fvu, multi_topk_fvu, callback_accumulator
-
-
-
-def compute_losses(model, dataloader, device):
-    model.eval()
-    total_loss = 0
-    num_batches = 0
-    
-    with torch.no_grad():
-        for batch in dataloader:
-            inputs = batch['input_ids'].to(device)
-            labels = batch['label'].to(device)
-            
-            outputs = model(inputs)
-
-            logits = outputs.logits.to(torch.float64)
-            logits = logits.reshape(-1, logits.size(-1))
-            
-            loss = F.cross_entropy(logits, labels)
-            total_loss += loss.item()
-            num_batches += 1
-    
-    return total_loss / num_batches
 
 
 def get_test_dataset():
@@ -259,7 +293,7 @@ def inference(model_path: Path, out_path: Path, sae_path: Path, args):
             checkpoint_data[epoch] = {}
 
         train_dataloader = DataLoader(dataset, batch_size=batch_size, drop_last=True)
-        test_dataloader = DataLoader(test_dataset, batch_size=batch_size, drop_last=True)
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size, drop_last=True) # type: ignore
 
         checkpoint_data[epoch]['parameter_norm'] = torch.cat([parameters.flatten() for parameters in model.parameters()]).flatten().norm(p=2).item()
         checkpoint_data[epoch]['train_loss'] = compute_losses(model, train_dataloader, device)
@@ -267,8 +301,8 @@ def inference(model_path: Path, out_path: Path, sae_path: Path, args):
 
         nnsight_model = NNsight(model)
         
-        attn_hookpoints = [f"vit.encoder.layer.{i}.attention.output" for i in range(len(nnsight_model.vit.encoder.layer))]
-        mlp_hookpoints = [f"vit.encoder.layer.{i}.output" for i in range(len(nnsight_model.vit.encoder.layer))]
+        attn_hookpoints = [f"vit.encoder.layer.{i}.attention.output" for i in range(len(nnsight_model.vit.encoder.layer))] # type: ignore
+        mlp_hookpoints = [f"vit.encoder.layer.{i}.output" for i in range(len(nnsight_model.vit.encoder.layer))] # type: ignore
 
         epoch_sae_path = sae_path / f'{epoch}'
         if not epoch_sae_path.exists():
@@ -298,20 +332,16 @@ def inference(model_path: Path, out_path: Path, sae_path: Path, args):
                 device=device
             )
 
-        # Check what everything represents now this is meaned over a large dataset rather than individual observations over a small dataset
-        def running_means(acts: Tensor, accumulator: defaultdict):
-            accumulator['mean_l2'] += torch.linalg.vector_norm(acts, ord=2, dim=1).mean() / acts.shape[0]
-            accumulator['var_trace'] += acts.var(dim=1).sum() / acts.shape[0]
-            return accumulator
-
         num_patches = (config.image_size // config.patch_size) ** 2 + 1 # +1 for the class token
-        
+
         mean_nodes, fvu, multi_topk_fvu, metrics = get_sae_acts(
             nnsight_model, all_submods, dictionaries, 
             train_dataloader, aggregate=True, input_key='input_ids', # mean=False, 
-            seq_len=num_patches, act_callback=running_means
+            seq_len=num_patches, act_callback=partial(batch_metrics, feature_dims=[1], instance_dims=[0])
+
         )
-        mean_node_scores = concatenate_values(mean_nodes)
+        mean_node_scores = concatenate_values(
+            mean_nodes)
 
         mean_fvu = np.mean([v for v in fvu.values()])
         mean_multi_topk_fvu = np.mean([v for v in multi_topk_fvu.values()])
@@ -328,15 +358,22 @@ def inference(model_path: Path, out_path: Path, sae_path: Path, args):
         checkpoint_data[epoch][f'hoyer_square'] = hoyer_square(mean_node_scores)
         checkpoint_data[epoch][f'gini'] = gini(mean_node_scores)
         checkpoint_data[epoch]['mean_l2'] = metrics['mean_l2']
+        checkpoint_data[epoch]['var_l2'] = metrics['var_l2']
+        checkpoint_data[epoch]['skew_l2'] = metrics['skew_l2'] 
+        checkpoint_data[epoch]['kurt_l2'] = metrics['kurt_l2']
         checkpoint_data[epoch]['var_trace'] = metrics['var_trace']
+
 
         del mean_node_scores, mean_nodes, fvu, multi_topk_fvu, # node_scores, nodes, 
 
         test_nodes, test_fvu, test_multi_topk_fvu, metrics = get_sae_acts(
             nnsight_model, all_submods, dictionaries, 
-            train_dataloader, aggregate=True, seq_len=num_patches, act_callback=running_means # mean=False, 
+            train_dataloader, aggregate=True, seq_len=num_patches, act_callback=batch_metrics 
+            # mean=False
+            # , 
         )
-        checkpoint_data[epoch]['test_sae_fvu'] = np.mean([v for v in test_fvu.values()])
+        checkpoint_data[epoch]['test_sae_fvu'] = np.mean(
+        [v for v in test_fvu.values()])
         checkpoint_data[epoch]['test_sae_multi_topk_fvu'] = np.mean([v for v in test_multi_topk_fvu.values()])
         checkpoint_data[epoch]['test_sae_entropy_nodes'] = {'nodes': test_nodes}   
 
@@ -349,6 +386,9 @@ def inference(model_path: Path, out_path: Path, sae_path: Path, args):
         checkpoint_data[epoch]['test_gini'] = gini(mean_test_node_scores)
 
         checkpoint_data[epoch]['test_mean_l2'] = metrics['mean_l2']
+        checkpoint_data[epoch]['test_var_l2'] = metrics['var_l2']
+        checkpoint_data[epoch]['test_skew_l2'] = metrics['skew_l2']
+        checkpoint_data[epoch]['test_kurt_l2'] = metrics['kurt_l2']
         checkpoint_data[epoch]['test_var_trace'] = metrics['var_trace']
 
     torch.save(checkpoint_data, out_path)
@@ -427,6 +467,13 @@ def plot(model_path: Path, out_path: Path, images_path: Path):
     add_scores_if_exists(fig, 'test_loss', 'Test loss', normalize=False)
     add_scores_if_exists(fig, 'parameter_norm', 'Parameter norm')
     add_scores_if_exists(fig, 'mean_l2', 'Mean L2', use_secondary_y=True)
+    add_scores_if_exists(fig, 'test_mean_l2', 'Test Mean L2', use_secondary_y=True)
+    add_scores_if_exists(fig, 'var_l2', 'Variance L2', use_secondary_y=True)
+    add_scores_if_exists(fig, 'test_var_l2', 'Test Variance L2', use_secondary_y=True)
+    add_scores_if_exists(fig, 'skew_l2', 'Skewness L2', use_secondary_y=True)
+    add_scores_if_exists(fig, 'test_skew_l2', 'Test Skewness L2', use_secondary_y=True)
+    add_scores_if_exists(fig, 'kurt_l2', 'Kurtosis L2', use_secondary_y=True)
+    add_scores_if_exists(fig, 'test_kurt_l2', 'Test Kurtosis L2', use_secondary_y=True)
     add_scores_if_exists(fig, 'var_trace', 'Variance trace', use_secondary_y=True)
     fig.update_layout(
         title=f"Loss and Stats over Epochs (MNIST)", 
@@ -463,4 +510,5 @@ if __name__ == "__main__":
 
     if args.inference:
         inference(model_path, out_path, sae_path, args)
+
     plot(model_path, out_path, images_path)

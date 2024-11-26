@@ -26,8 +26,8 @@ import lovely_tensors as lt
 from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy, get_transformer_resid_node_scores, get_circuit
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.feature_circuits.patch_nodes import patch_nodes
-from ngrams_across_time.grok.transformers import CustomTransformer, TransformerConfig
-from ngrams_across_time.grok.metrics import hoyer, hoyer_square, gini, abs_score_entropy
+from ngrams_across_time.clearnets.transformers import CustomTransformer, TransformerConfig
+from ngrams_across_time.clearnets.metrics import hoyer, hoyer_square, gini, abs_score_entropy
 
 
 lt.monkey_patch()

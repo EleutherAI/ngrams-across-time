@@ -1,10 +1,15 @@
-from argparse import ArgumentParser
+# Initial modular addition experiments using many kinds of patching
+# And both residual and SAE node scores
+# Kept for reference
 from pathlib import Path
 
 import torch
 import plotly.graph_objects as go
 import lovely_tensors as lt
 import plotly.express as px
+import plotly.io as pio
+
+pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3469
 
 lt.monkey_patch()
 device = torch.device("cuda")

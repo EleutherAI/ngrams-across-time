@@ -14,24 +14,25 @@ def mean_l2(tensor: Tensor) -> float:
 def var_trace(tensor: Tensor) -> float:
     return tensor.var(dim=1).sum().item()
 
-def abs_score_entropy(vec: ndarray):
+
+def abs_entropy(vec: ndarray):
     abs_vec = np.abs(vec)
     sum_scores = abs_vec.sum()
     probs = abs_vec / sum_scores
 
-    return stats.entropy(probs)
+    return float(stats.entropy(probs))
 
 def gini(vec: ndarray):
     n = len(vec)
     diffs = np.abs(np.subtract.outer(vec, vec)).mean()
 
-    return np.sum(diffs) / (2 * n**2 * np.mean(vec))
+    return float(np.sum(diffs) / (2 * n**2 * np.mean(vec)))
 
 def hoyer(vec: ndarray):
     l1 = np.linalg.norm(vec, 1)
     l2 = np.linalg.norm(vec, 2)
 
-    return l1 / l2
+    return float(l1 / l2)
 
 def hoyer_square(vec: ndarray):
     return hoyer(vec ** 2)

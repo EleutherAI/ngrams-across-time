@@ -107,9 +107,9 @@ def create_matched_models(image_size=32, num_labels=10):
     warmup_steps = 10_000
 
     models = {
-        'ConvNeXtV2': ScheduleFreeLightningWrapper(convnext_model, learning_rate, betas, warmup_steps),
+        # 'ConvNeXtV2': ScheduleFreeLightningWrapper(convnext_model, learning_rate, betas, warmup_steps),
         'Swin': ScheduleFreeLightningWrapper(swin_model, learning_rate, betas, warmup_steps),
-        'ViT': ScheduleFreeLightningWrapper(vit_model, learning_rate, betas, warmup_steps)
+        # 'ViT': ScheduleFreeLightningWrapper(vit_model, learning_rate, betas, warmup_steps)
     }
     param_counts = {
         name: sum(p.numel() for p in model.parameters())
@@ -211,17 +211,17 @@ def train():
     )
 
     for name, model in results['models'].items():
-        precision = '32' # 'bf16-mixed'
-        wandb_name = f"{name}_s={args.seed}_p={precision}"
-        ckpts_path = Path('arch-evals-2') / wandb_name
+        # seed=38 models trained in 32bit, didn't affect perf
+        wandb_name = f"{name}_s={args.seed}"
+        ckpts_path = Path('arch-evals') / wandb_name
         if not ckpts_path.exists() or args.overwrite:
             trainer = pl.Trainer(
-                devices=[1],
+                devices=[1, 3],
                 logger=WandbLogger(
                     name=wandb_name, project="arch-evals", entity="eleutherai", reinit=True
                 ) if not args.debug else None,
-                max_epochs=200,
-                precision=precision,
+                max_epochs=300,
+                precision='bf16-mixed',
                 deterministic=True,
                 gradient_clip_val=None,
                 callbacks=[
@@ -241,15 +241,13 @@ def train():
 
         if args.sae:
             assert results['hookpoints'][name] != [], "Hookpoints not set for model"
-            # debug name
-            debug_name = f'{name}_overfit'
             cfg = TrainConfig(
                 SaeConfig(multi_topk=True, expansion_factor=8),
                 batch_size=8,
-                run_name=str(debug_name),
+                run_name=str(wandb_name),
                 log_to_wandb=True,
                 hookpoints=results['hookpoints'][name],
-                vision=True,
+                vision=name == 'ConvNeXtV2',
                 grad_acc_steps=2,
                 micro_acc_steps=2,
             )

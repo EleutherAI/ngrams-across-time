@@ -27,7 +27,7 @@ from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy, ge
 from ngrams_across_time.utils.utils import assert_type, set_seeds
 from ngrams_across_time.feature_circuits.patch_nodes import patch_nodes
 from ngrams_across_time.clearnets.transformers import CustomTransformer, TransformerConfig
-from ngrams_across_time.clearnets.metrics import hoyer, hoyer_square, gini, abs_score_entropy
+from ngrams_across_time.clearnets.metrics import hoyer, hoyer_square, gini, abs_entropy
 
 
 lt.monkey_patch()
@@ -283,7 +283,7 @@ def main():
 
             node_scores = all_node_scores(nodes)
 
-            checkpoint_data[epoch][f'sae_entropy'] = abs_score_entropy(node_scores)
+            checkpoint_data[epoch][f'sae_entropy'] = abs_entropy(node_scores)
 
             
             checkpoint_data[epoch][f'hoyer'] = hoyer(node_scores)
@@ -334,7 +334,7 @@ def main():
                 
                 # 1. Entropy measure
                 # 2. Linearized approximation of number of nodes to ablate to achieve random accuracy
-                checkpoint_data[epoch][node_score_type]['entropy'] = abs_score_entropy(node_scores)
+                checkpoint_data[epoch][node_score_type]['entropy'] = abs_entropy(node_scores)
 
                 scores = all_node_scores(nodes)
                 sorted_scores = np.sort(scores)[::-1]

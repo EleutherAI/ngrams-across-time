@@ -5,12 +5,15 @@ import torch
 import plotly.graph_objects as go
 import lovely_tensors as lt
 import plotly.express as px
+import plotly.io as pio
+
+pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3469
 
 lt.monkey_patch()
 device = torch.device("cuda")
 
 
-def main():
+def plot_sparsity():
     images_path = Path("images")
     images_path.mkdir(exist_ok=True)
 
@@ -205,8 +208,6 @@ def main():
     )                                           
     fig.write_image(images_path / f'feature_sharing_baseline_gini.pdf', format='pdf')
 
- 
-
 
 if __name__ == "__main__":
-    main()
+    plot_sparsity()

@@ -52,7 +52,7 @@ class LogSpacedCheckpoint(ModelCheckpoint):
     
 class ScheduleFreeLightningWrapper(pl.LightningModule):
     """
-    PyTorch Lightning wrapper for Hugging Face vision models.
+    PyTorch Lightning wrapper for Hugging Face models that uses the AdamW schedule-free optimizer.
     """
     def __init__(self, model, learning_rate=1e-4, betas=(0.9, 0.999), warmup_steps=10_000):
         super().__init__()

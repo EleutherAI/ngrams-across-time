@@ -13,7 +13,7 @@ lt.monkey_patch()
 device = torch.device("cuda")
 
 
-def plot_sparsity():
+def plot_modular_addition_grok():
     images_path = Path("images")
     images_path.mkdir(exist_ok=True)
 
@@ -26,6 +26,7 @@ def plot_sparsity():
         run_identifier = f"{model_seed}"
 
         # Use existing on-disk model checkpoints
+        import sys; sys.modules['ngrams_across_time.grok'] = sys.modules['ngrams_across_time.clearnets']
         MODEL_PATH = Path(f"workspace/grok/{run_identifier}.pth")
         cached_data = torch.load(MODEL_PATH)
         
@@ -132,7 +133,7 @@ def plot_sparsity():
         yaxis2_title="Sparsity score",
         width=1000
     )                                           
-    fig.write_image(images_path / f'feature_sharing_entropy.pdf', format='pdf')
+    fig.write_image(images_path / f'grok_feature_sharing_entropy.pdf', format='pdf')
 
     fig: go.Figure = make_subplots(specs=[[{"secondary_y": True}]])
     add_scores_if_exists(fig, 'train_loss', None, 'Train loss', checkpoint_datas[seeds[0]])
@@ -147,7 +148,7 @@ def plot_sparsity():
         yaxis2_title="Sparsity score",
         width=1000
     )                                           
-    fig.write_image(images_path / f'feature_sharing_hoyer.pdf', format='pdf')
+    fig.write_image(images_path / f'grok_feature_sharing_hoyer.pdf', format='pdf')
 
 
     fig: go.Figure = make_subplots(specs=[[{"secondary_y": True}]])
@@ -163,7 +164,7 @@ def plot_sparsity():
         yaxis2_title="Sparsity score",
         width=1000
     )                                           
-    fig.write_image(images_path / f'feature_sharing_gini.pdf', format='pdf')
+    fig.write_image(images_path / f'grok_feature_sharing_gini.pdf', format='pdf')
 
     # add_seed_scores_if_exists(fig, 'hoyer_square', None, 'Hoyer Square', checkpoint_datas, color_idx=2)
     # add_seed_scores_if_exists(fig, 'sae_fvu', None, 'SAE FVU', checkpoint_datas, color_idx=3)
@@ -191,7 +192,7 @@ def plot_sparsity():
         yaxis2_title="Sparsity score",
         width=1000
     )                                           
-    fig.write_image(images_path / f'feature_sharing_baseline.pdf', format='pdf')
+    fig.write_image(images_path / f'grok_feature_sharing_baseline.pdf', format='pdf')
 
     fig: go.Figure = make_subplots(specs=[[{"secondary_y": True}]])
     add_scores_if_exists(fig, 'train_loss', None, 'Train loss', baseline_data)
@@ -206,8 +207,8 @@ def plot_sparsity():
         yaxis2_title="Sparsity score",
         width=1000
     )                                           
-    fig.write_image(images_path / f'feature_sharing_baseline_gini.pdf', format='pdf')
+    fig.write_image(images_path / f'grok_feature_sharing_baseline_gini.pdf', format='pdf')
 
 
 if __name__ == "__main__":
-    plot_sparsity()
+    plot_modular_addition_grok()

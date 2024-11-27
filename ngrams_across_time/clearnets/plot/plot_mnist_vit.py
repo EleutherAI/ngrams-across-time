@@ -12,7 +12,6 @@ lt.monkey_patch()
 
 
 def plot_mnist_vit(model_path: Path, out_path: Path, images_path: Path):
-
     checkpoint_data = torch.load(out_path)
     checkpoint_epochs = torch.load(model_path)['checkpoint_epochs']
 

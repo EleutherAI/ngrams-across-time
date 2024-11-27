@@ -1,7 +1,6 @@
 import os
 from argparse import ArgumentParser
 from pathlib import Path
-import sys
 
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
@@ -20,7 +19,7 @@ from ngrams_across_time.utils.utils import set_seeds
 from ngrams_across_time.clearnets.transformers import CustomTransformer
 
 from ngrams_across_time.clearnets.inference.inference import get_metrics
-from ngrams_across_time.clearnets.plot.plot_sparsity import plot_sparsity
+from ngrams_across_time.clearnets.plot.plot_modular_addition_grok import plot_modular_addition_grok
 
 import plotly.io as pio
 
@@ -58,7 +57,7 @@ def inference(args):
     run_identifier = f"{args.model_seed}{'-' + args.run_name if args.run_name else ''}"
 
     # torch.load hack to load model checkpoints from before module rename
-    sys.modules['ngrams_across_time.grok'] = sys.modules['ngrams_across_time.clearnets']
+    import sys; sys.modules['ngrams_across_time.grok'] = sys.modules['ngrams_across_time.clearnets']
     # Use existing on-disk model checkpoints
     MODEL_PATH = Path(f"workspace/grok/{run_identifier}.pth")
     cached_data = torch.load(MODEL_PATH)
@@ -190,4 +189,4 @@ if __name__ == "__main__":
 
     if args.plot:
         # Plots data over five model seeds
-        plot_sparsity()
+        plot_modular_addition_grok()

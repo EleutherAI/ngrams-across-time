@@ -1,7 +1,6 @@
 from argparse import ArgumentParser
 from pathlib import Path
 from functools import partial
-import os
 
 import torch.nn.functional as F
 from tqdm import tqdm

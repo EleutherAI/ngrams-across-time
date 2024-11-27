@@ -17,7 +17,7 @@ import plotly.io as pio
 from ngrams_across_time.utils.utils import set_seeds
 from ngrams_across_time.language.hf_client import get_model_checkpoints
 from ngrams_across_time.clearnets.inference.inference import get_metrics
-from ngrams_across_time.clearnets.plot.plot_pythia import plot_pythia_stats
+from ngrams_across_time.clearnets.plot.plot_pythia import plot_pythia
 
 
 pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3469
@@ -142,7 +142,7 @@ def main():
     torch.save(checkpoint_data, OUT_PATH)
     
     if args.plot:
-        plot_pythia_stats(OUT_PATH, log_checkpoints, test_early_index)
+        plot_pythia(OUT_PATH, log_checkpoints, test_early_index)
     
 if __name__ == "__main__":
     main()

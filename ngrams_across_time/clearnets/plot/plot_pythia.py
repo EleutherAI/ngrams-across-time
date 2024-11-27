@@ -5,10 +5,21 @@ import plotly.graph_objects as go
 from pathlib import Path
 import plotly.io as pio
 
+from ngrams_across_time.language.hf_client import get_model_checkpoints
+
 pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3469
 
 
-def plot_pythia_stats(out_path: Path, log_checkpoints: dict, stop: int):
+def plot_pythia(stop: int | None = None):
+    model_name = "pythia-160m"
+    out_path = Path(f"workspace/inference/{model_name}.pth")
+
+    checkpoints = get_model_checkpoints(f"EleutherAI/{model_name}")    
+    log2_keys = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, 2000, 4000, 8000, 16_000, 33_000, 66_000, 131_000, 143_000]
+    log_checkpoints = {key: checkpoints[key] for key in log2_keys}
+
+    stop = stop or len(log_checkpoints)
+
     checkpoint_data = torch.load(out_path)
 
     def add_scores_if_exists(

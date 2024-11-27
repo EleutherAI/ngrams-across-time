@@ -1,5 +1,4 @@
 
-import time
 import numpy as np
 from numpy import ndarray
 import torch
@@ -10,6 +9,7 @@ from scipy.optimize import linear_sum_assignment
 
 def mean_l2(tensor: Tensor) -> float:
     return torch.linalg.vector_norm(tensor, ord=2, dim=1).mean().item()
+
 
 def var_trace(tensor: Tensor) -> float:
     return tensor.var(dim=1).sum().item()
@@ -22,17 +22,20 @@ def abs_entropy(vec: ndarray):
 
     return float(stats.entropy(probs))
 
+
 def gini(vec: ndarray):
     n = len(vec)
     diffs = np.abs(np.subtract.outer(vec, vec)).mean()
 
     return float(np.sum(diffs) / (2 * n**2 * np.mean(vec)))
 
+
 def hoyer(vec: ndarray):
     l1 = np.linalg.norm(vec, 1)
     l2 = np.linalg.norm(vec, 2)
 
     return float(l1 / l2)
+
 
 def hoyer_square(vec: ndarray):
     return hoyer(vec ** 2)

@@ -235,3 +235,7 @@ cifar-10-batches-py/
 transformer-reasoning/
 arch-evals/
 ConvNeXtV2/
+ConvNeXtV2_s=38/
+ConvNeXtV2_overfit/
+ViT_s=38/
+Swin_s=38/

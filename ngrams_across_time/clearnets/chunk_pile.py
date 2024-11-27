@@ -1,4 +1,6 @@
-# Split the pile into 8 billion token chunks named after the roughly log spaced steps we're going to use them with
+# Split the pile into 8 billion token chunks named after roughly log spaced pythia training steps 
+# Chunks are used to traing SAEs on the corresponding pythia checkpoint
+
 from numpy import memmap
 import os
 from pathlib import Path

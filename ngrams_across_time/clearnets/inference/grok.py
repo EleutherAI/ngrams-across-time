@@ -1,23 +1,25 @@
 import os
 from argparse import ArgumentParser
 from pathlib import Path
+import sys
 
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torch
-import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from nnsight import LanguageModel
-from sae import SaeConfig, Sae, TrainConfig, SaeTrainer
+# from sae import SaeConfig, Sae, TrainConfig, SaeTrainer
+from sae.trainer import SaeTrainer
+from sae.sae import Sae
+from sae.config import SaeConfig, TrainConfig
 from datasets import Dataset as HfDataset
 import lovely_tensors as lt
 
-# from ngrams_across_time.feature_circuits.circuit import get_mean_sae_entropy
-from ngrams_across_time.utils.utils import assert_type, set_seeds
-from ngrams_across_time.clearnets.transformers import CustomTransformer, TransformerConfig
+from ngrams_across_time.utils.utils import set_seeds
+from ngrams_across_time.clearnets.transformers import CustomTransformer
 
-from ngrams_across_time.clearnets.inference.mnist_vit import concatenate_values, get_sparsity_metrics, get_sae_acts
+from ngrams_across_time.clearnets.inference.inference import get_metrics
 from ngrams_across_time.clearnets.plot.plot_sparsity import plot_sparsity
 
 import plotly.io as pio
@@ -28,23 +30,35 @@ set_seeds(598)
 device = torch.device("cuda")
 
 
-def get_args():
-    parser = ArgumentParser()
-    parser.add_argument("--plot", action="store_true")
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--model_seed", type=int, default=1, help="Model seed to load checkpoints for")
-    parser.add_argument("--run_name", type=str, default='')
-    parser.add_argument("--sae_name", type=str, default='')
-    return parser.parse_args()
+def compute_losses(model, dataloader: DataLoader, device: torch.device):
+    model.eval()
+    total_loss = 0
+    num_batches = 0
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            batch = batch['input_ids'].to(device)
+
+            inputs = batch[:, :-1]
+            targets = batch[:, 1:]
+            
+            logits = model(inputs, targets).logits.to(torch.float64)
+
+            logits = logits.reshape(-1, logits.size(-1))
+            targets = targets.reshape(-1)
+            
+            loss = F.cross_entropy(logits, targets)
+            total_loss += loss.item()
+            num_batches += 1
+    
+    return total_loss / num_batches
 
 
-def main():
-    images_path = Path("images")
-    images_path.mkdir(exist_ok=True)
-
-    args = get_args()
+def inference(args):
     run_identifier = f"{args.model_seed}{'-' + args.run_name if args.run_name else ''}"
 
+    # torch.load hack to load model checkpoints from before module rename
+    sys.modules['ngrams_across_time.grok'] = sys.modules['ngrams_across_time.clearnets']
     # Use existing on-disk model checkpoints
     MODEL_PATH = Path(f"workspace/grok/{run_identifier}.pth")
     cached_data = torch.load(MODEL_PATH)
@@ -55,15 +69,13 @@ def main():
     model_checkpoints = cached_data["checkpoints"][::5]
     checkpoint_epochs = cached_data["checkpoint_epochs"][::5]
 
-    test_early_index = len(model_checkpoints)
-    model_checkpoints = model_checkpoints[:test_early_index]
-    checkpoint_epochs = checkpoint_epochs[:test_early_index]    
+    debug_early_index = len(model_checkpoints)
+    model_checkpoints = model_checkpoints[:debug_early_index]
+    checkpoint_epochs = checkpoint_epochs[:debug_early_index]    
     
     checkpoint_data = torch.load(OUT_PATH) if OUT_PATH.exists() else {}
 
     config = cached_data['config']
-    config = assert_type(TransformerConfig, config)
-
     dataset = cached_data['dataset']
     labels = cached_data['labels']
     train_indices = cached_data['train_indices']
@@ -73,9 +85,6 @@ def main():
     train_labels = labels[train_indices]
     print(len(train_data), "train data items")
 
-    test_data = dataset[test_indices]
-    test_labels = labels[test_indices]
-    
     # SAEs get lower FVU on multiple epochs
     num_epochs = 128
     sae_train_dataset = HfDataset.from_dict({
@@ -85,7 +94,21 @@ def main():
     sae_train_dataset.set_format(type="torch", columns=["input_ids", "labels"])
     
     # Subset of data to collect eval metrics
-    len_sample_data = 4 if args.debug else 40
+    dataset = HfDataset.from_dict({
+        "input_ids": train_data,
+        "labels": train_labels,
+    })
+    dataset.set_format(type="torch", columns=["input_ids", "labels"])
+    train_dl = DataLoader(dataset, batch_size=64, drop_last=True) # type: ignore
+
+    test_data = dataset[test_indices]
+    test_labels = labels[test_indices]
+    test_dataset = HfDataset.from_dict({
+        "input_ids": test_data,
+        "labels": test_labels,
+    })
+    test_dataset.set_format(type="torch", columns=["input_ids", "labels"])
+    test_dl = DataLoader(test_dataset, batch_size=64, drop_last=True) # type: ignore
 
     model = CustomTransformer(config)
 
@@ -132,35 +155,39 @@ def main():
                 device=device
             )
         all_submods = [submod for layer_submods in zip(attns, mlps) for submod in layer_submods]
-
-        dataset = TensorDataset(train_data[:len_sample_data])
-        dataloader = DataLoader(dataset, batch_size=64, drop_last=True)
-
-        nodes, fvu, multi_topk_fvu, metrics = get_sae_acts(
-            nnsight_model, all_submods, dictionaries, 
-            dataloader, seq_len=len(train_data[0]), aggregate=True,
-        )
         
         # Collect metrics
-        checkpoint_data[epoch]['parameter_norm'] = torch.cat([parameters.flatten() for parameters in model.parameters()]).flatten().norm(p=2).item()
-        checkpoint_data[epoch]['train_loss'] = F.cross_entropy(model(train_data[:len_sample_data].to(device)).logits.to(torch.float64)[:, -1], train_labels[:len_sample_data].to(device)).mean().item()
-        checkpoint_data[epoch]['test_loss'] = F.cross_entropy(model(test_data[:len_sample_data].to(device)).logits.to(torch.float64)[:, -1], test_labels[:len_sample_data].to(device)).mean().item()
-        
-        checkpoint_data[epoch][f'sae_fvu'] = np.mean([v.item() for v in fvu.values()])
-        checkpoint_data[epoch][f'sae_multi_topk_fvu'] = np.mean([v.item() for v in multi_topk_fvu.values()])
-        
-        checkpoint_data[epoch][f'sae_entropy_nodes'] = {'nodes': nodes}   
-
-        node_scores = concatenate_values(nodes)
-
-        checkpoint_data[epoch].update(get_sparsity_metrics(node_scores))
+        checkpoint_data[epoch]['train_loss'] = compute_losses(model, train_dl, device)
+        checkpoint_data[epoch]['test_loss'] = compute_losses(model, test_dl, device)
+        checkpoint_data[epoch].update(get_metrics(
+            model, 
+            nnsight_model, 
+            dictionaries, 
+            all_submods, 
+            train_dl, 
+            test_dl, 
+            len(train_data[0])
+        ))
+        torch.save(checkpoint_data, OUT_PATH)
 
     torch.save(checkpoint_data, OUT_PATH)
+
+    
+def get_args():
+    parser = ArgumentParser()
+    parser.add_argument("--plot", action="store_true")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--model_seed", type=int, default=1, help="Model seed to load checkpoints for")
+    parser.add_argument("--run_name", type=str, default='')
+    parser.add_argument("--sae_name", type=str, default='v2')
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = get_args()
+
+    inference(args)
 
     if args.plot:
         # Plots data over five model seeds
         plot_sparsity()
-        
-
-if __name__ == "__main__":
-    main()

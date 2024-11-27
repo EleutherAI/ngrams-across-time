@@ -1,3 +1,5 @@
+# Functions to collect SAE-based metrics
+
 from typing import Callable, Any
 from collections import defaultdict
 from functools import partial
@@ -8,14 +10,11 @@ from torch import Tensor
 from sae.sae import Sae
 from torch.utils.data import DataLoader
 import nnsight
-from numpy import ndarray
 
 from ngrams_across_time.clearnets.metrics import gini, hoyer, hoyer_square, abs_entropy
 
-device = torch.device("cuda")
 
-# Check what everything represents now this is meaned over a large dataset rather than individual observations over a small dataset
-def batch_metrics(
+def get_batch_metrics(
     acts: Tensor, 
     accumulator: defaultdict[str, list], 
     feature_dims = [2], 
@@ -64,15 +63,6 @@ def concatenate_values(dictionary: dict[Any, Tensor]) -> np.ndarray:
     return np.array(scores)
 
 
-def get_sparsity_metrics(vec: ndarray) -> dict[str, float]:
-    return {
-        'abs_entropy': abs_entropy(vec),
-        'hoyer': hoyer(vec),
-        'hoyer_square': hoyer_square(vec),
-        'gini': gini(vec)
-    }
-
-
 @torch.no_grad()
 def get_sae_acts(
         model,
@@ -100,7 +90,6 @@ def get_sae_acts(
                 if hasattr(submodule, 'nns_output') 
                 else submodule.output
             )
-            # isinstance(output, tuple) doesn't work with pythia call
             is_tuple[submodule] = type(output.shape) == tuple 
 
     with model.trace(first_batch[input_key].to(device)) as tracer:
@@ -165,7 +154,6 @@ def get_sae_acts(
     return nodes, fvu, multi_topk_fvu, callback_accumulator
 
 
-
 def get_metrics(
     model, 
     nnsight_model,
@@ -185,7 +173,7 @@ def get_metrics(
     mean_nodes, fvu, multi_topk_fvu, metrics = get_sae_acts(
         nnsight_model, all_submods, dictionaries, 
         train_dl, aggregate=True, input_key='input_ids',
-        seq_len=seq_len, act_callback=partial(batch_metrics, feature_dims=feature_dims, instance_dims=instance_dims)
+        seq_len=seq_len, act_callback=partial(get_batch_metrics, feature_dims=feature_dims, instance_dims=instance_dims)
 
     )
     mean_node_scores = concatenate_values(
@@ -213,7 +201,7 @@ def get_metrics(
 
     test_nodes, test_fvu, test_multi_topk_fvu, running_metrics = get_sae_acts(
         nnsight_model, all_submods, dictionaries, 
-        test_dl, aggregate=True, seq_len=seq_len, act_callback=batch_metrics
+        test_dl, aggregate=True, seq_len=seq_len, act_callback=get_batch_metrics
     )
     metrics['test_sae_fvu'] = np.mean([v for v in test_fvu.values()])
     metrics['test_sae_multi_topk_fvu'] = np.mean([v for v in test_multi_topk_fvu.values()])

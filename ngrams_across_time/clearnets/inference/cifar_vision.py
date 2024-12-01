@@ -131,8 +131,6 @@ def get_test_dataset():
     return test_dataset
 
 
-# Inject load model callable
-# Inject load SAE callable
 def inference(model_path: Path, out_path: Path, sae_path: Path):
     cached_data = torch.load(model_path)
 
@@ -171,12 +169,13 @@ def inference(model_path: Path, out_path: Path, sae_path: Path):
 
     load_dictionaries = partial(load_mnist_vit_dictionaries, sae_train_dataset=sae_train_dataset, sae_path=sae_path)
 
+    checkpoint_data = torch.load(out_path) if out_path.exists() else {}
+
     dataloaders = {
         'train': train_dl,
         'test': test_dl
     }
-
-    checkpoint_data = torch.load(out_path) if out_path.exists() else {}
+    
     for epoch, state_dict in tqdm(list(zip(checkpoint_epochs, model_checkpoints))):
         model.load_state_dict(state_dict)
         model.cuda() # type: ignore
@@ -194,7 +193,7 @@ def inference(model_path: Path, out_path: Path, sae_path: Path):
             nnsight_model,
             dictionaries,
             all_submods,
-            dataloaders
+            dataloaders,
         ))
 
         torch.save(checkpoint_data, out_path)

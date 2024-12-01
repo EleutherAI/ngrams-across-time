@@ -16,7 +16,7 @@ import plotly.io as pio
 
 from ngrams_across_time.utils.utils import set_seeds
 from ngrams_across_time.language.hf_client import get_model_checkpoints
-from ngrams_across_time.clearnets.inference.inference import get_metrics
+from ngrams_across_time.clearnets.inference.inference import get_sae_metrics
 from ngrams_across_time.clearnets.plot.plot_pythia import plot_pythia
 
 
@@ -98,8 +98,14 @@ def main():
     len_sample_data = 32 if args.debug else 512
     train_dl = DataLoader(train_data.select(range(len_sample_data)), batch_size=batch_size, drop_last=True) 
     test_dl = DataLoader(test_data.select(range(len_sample_data)), batch_size=batch_size, drop_last=True) 
+    dataloaders = {
+        "train": train_dl,
+        "test": test_dl
+    }
 
     load_dictionaries = partial(load_pythia_dictionaries, sae_path=sae_path)
+
+
 
     for step_number, checkpoint in tqdm(log_checkpoints.items()):
         if step_number not in checkpoint_data:
@@ -126,14 +132,12 @@ def main():
 
         checkpoint_data[step_number]['train_loss'] = compute_losses(model, train_dl, device)
         checkpoint_data[step_number]['test_loss'] = compute_losses(model, test_dl, device)
-        checkpoint_data[step_number].update(get_metrics(
+        checkpoint_data[step_number].update(get_sae_metrics(
             model, 
             nnsight_model,
             dictionaries,
             all_submods,
-            train_dl, 
-            test_dl, 
-            seq_len=2049,
+            dataloaders,
             feature_dims=[2],
             instance_dims=[0, 1],
         ))

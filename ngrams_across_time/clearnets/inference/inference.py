@@ -1,57 +1,66 @@
 # Functions to collect SAE-based metrics
 
-from typing import Callable, Any
+from typing import Any
 from collections import defaultdict
-from functools import partial
 
 import torch
 import numpy as np
 from torch import Tensor
 from sae.sae import Sae
 from torch.utils.data import DataLoader
-import nnsight
 
-from ngrams_across_time.clearnets.metrics import gini, hoyer, hoyer_square, abs_entropy
+from ngrams_across_time.clearnets.metrics import gini, hoyer, hoyer_square, abs_entropy, rank
 
 
 def get_batch_metrics(
-    acts: Tensor, 
-    accumulator: defaultdict[str, list], 
-    feature_dims = [2], 
-    instance_dims = [0, 1]
+    acts: Tensor,
+    accumulator: defaultdict[str, list],
+    feature_dims=[2],
+    instance_dims=[0, 1],
 ):
+    acts = acts.to(torch.float64)
     if acts.ndim != 2:
         permuted_dims = instance_dims + feature_dims
         acts = acts.permute(*permuted_dims)
         acts = acts.flatten(0, len(instance_dims) - 1)
         acts = acts.flatten(1, len(feature_dims))
-    
+
     l2_norms = torch.norm(acts, dim=1)
 
     # L2 norm mean
-    accumulator['mean_l2'].append(l2_norms.mean().item())
-    
+    accumulator["mean_l2"].append(l2_norms.mean().item())
+
     # L2 norm variance
-    accumulator['var_l2'].append(l2_norms.var().item())
-    
+    accumulator["var_l2"].append(l2_norms.var().item())
+
     # L2 norm skewness: E[(X - μ)³] / σ³
     centered = l2_norms - l2_norms.mean()
-    skew = (centered ** 3).mean() / (l2_norms.std() ** 3)
-    accumulator['skew_l2'].append(skew.item())
-    
+    skew = (centered**3).mean() / (l2_norms.std() ** 3)
+    accumulator["skew_l2"].append(skew.item())
+
     # L2 norm kurtosis: E[(X - μ)⁴] / σ⁴ - 3 (subtracting 3 gives excess kurtosis)
-    kurt = (centered ** 4).mean() / (l2_norms.var() ** 2) - 3
-    accumulator['kurt_l2'].append(kurt.item())
+    kurt = (centered**4).mean() / (l2_norms.var() ** 2) - 3
+    accumulator["kurt_l2"].append(kurt.item())
 
     # Element-wise variance
-    accumulator['var_trace'].append(torch.trace(torch.cov(acts.T.float())).item())
+    acts_centered = acts - acts.mean(dim=0, keepdim=True)
+    var_trace = (acts_centered.pow(2)).mean(dim=0).sum().item()
+    accumulator["var_trace"].append(var_trace)
 
     return accumulator
-    
 
-def to_dense(top_acts: Tensor, top_indices: Tensor, num_latents: int):
-    # In-place scatter seemed to break nnsight
-    dense_empty = torch.zeros(top_acts.shape[0], top_acts.shape[1], num_latents, device=top_acts.device, dtype=top_acts.dtype, requires_grad=True)
+
+def to_dense(
+    top_acts: Tensor, top_indices: Tensor, num_latents: int, instance_dims=[0, 1]
+):
+    instance_shape = [top_acts.shape[i] for i in instance_dims]
+    dense_empty = torch.zeros(
+        *instance_shape,
+        num_latents,
+        device=top_acts.device,
+        dtype=top_acts.dtype,
+        requires_grad=True,
+    )
     return dense_empty.scatter(-1, top_indices.long(), top_acts)
 
 
@@ -59,166 +68,290 @@ def concatenate_values(dictionary: dict[Any, Tensor]) -> np.ndarray:
     scores = []
     for values in dictionary.values():
         scores.extend(values.flatten().tolist())
-        
+
     return np.array(scores)
 
 
+def flatten_acts(acts: Tensor, instance_dims: list[int], feature_dims: list[int]):
+    permuted_dims = instance_dims + feature_dims
+    acts = acts.permute(*permuted_dims)
+    acts = acts.flatten(0, len(instance_dims) - 1)
+    acts = acts.flatten(1, len(feature_dims))
+
+    return acts
+
+
 @torch.no_grad()
-def get_sae_acts(
-        model,
-        ordered_submods: list,
-        dictionaries: dict[Any, Sae],
-        dataloader: DataLoader,
-        # for VIT this is equal to the number of patches
-        seq_len: int | None,
-        aggregate: bool = True, # or 'none' for not aggregating across sequence position
-        device: str | torch.device = torch.device("cuda"),
-        input_key: str = 'input_ids',
-        act_callback: Callable | None = None
+def get_mean_sae_acts(
+    model,
+    ordered_submods: list,
+    dictionaries: dict[Any, Sae],
+    dataloader: DataLoader,
+    device: str | torch.device = torch.device("cuda"),
+    input_key: str = "input_ids",
+    feature_dims=[2],
+    instance_dims=[0, 1],
 ):
     """Meaned over a large dataset"""
-    # Collect metadata and preallocate tensors    
+    # Collect metadata
     is_tuple = {}
     first_batch = next(iter(dataloader))
-    batch_size = first_batch[input_key].shape[0]
-    accumulated_nodes = {}
-    # with torch.amp.autocast(str(device)):
-    with model.scan(first_batch[input_key].to(device)) as tracer:
+    with model.scan(first_batch[input_key].to(device)):
         for submodule in ordered_submods:
             output = (
-                submodule.nns_output 
-                if hasattr(submodule, 'nns_output') 
+                submodule.nns_output
+                if hasattr(submodule, "nns_output")
                 else submodule.output
             )
-            is_tuple[submodule] = type(output.shape) == tuple 
+            is_tuple[submodule] = type(output.shape) == tuple
 
-    with model.trace(first_batch[input_key].to(device)) as tracer:
-        for submodule in ordered_submods:
-            num_latents = dictionaries[submodule].num_latents
-            shape = (batch_size, num_latents) if aggregate or seq_len is None else (batch_size, seq_len, num_latents)
-            accumulated_nodes[submodule.path] = torch.zeros(shape, dtype=torch.float64).save() # type: ignore
+    accumulated_nodes = {}
+    for submodule in ordered_submods:
+        num_latents = dictionaries[submodule].num_latents
+        accumulated_nodes[submodule.path] = torch.zeros(num_latents, dtype=torch.float64)  # type: ignore
 
     # Do inference
-    total_samples = 0
+    accumulated_fvu = {submodule.path: 0.0 for submodule in ordered_submods}
+    accumulated_multi_topk_fvu = {submodule.path: 0.0 for submodule in ordered_submods}
+    accumulated_sample_count = {submodule.path: 0.0 for submodule in ordered_submods}
     num_batches = 0
-    accumulated_fvu = {submodule.path: 0. for submodule in ordered_submods}
-    accumulated_multi_topk_fvu = {submodule.path: 0. for submodule in ordered_submods}
-    callback_accumulator = defaultdict(list)
 
     with torch.amp.autocast(str(device)):
-        for batch in dataloader:
-            batch_nodes = {}
-            batch_fvus = {}
-            batch_multi_topk_fvus = {}
-            
-            with model.trace(batch[input_key].to(device)) as tracer:
+        for i, batch in enumerate(dataloader):
+            inputs = {}
+            with model.trace(batch[input_key].to(device)):
                 for submodule in ordered_submods:
-                    num_latents = dictionaries[submodule].num_latents
-
-                    if hasattr(submodule, 'nns_output'):
-                        input = submodule.nns_output if not is_tuple[submodule] else submodule.nns_output[0]
+                    if hasattr(submodule, "nns_output"):
+                        input = (
+                            submodule.nns_output
+                            if not is_tuple[submodule]
+                            else submodule.nns_output[0]
+                        )
                     else:
-                        input = submodule.output if not is_tuple[submodule] else submodule.output[0]
+                        input = (
+                            submodule.output
+                            if not is_tuple[submodule]
+                            else submodule.output[0]
+                        )
 
-                    dictionary = dictionaries[submodule]
+                    inputs[submodule] = input.save()
 
-                    flat_f = nnsight.apply(dictionary.forward, input.flatten(0, 1))
-                    batch_fvus[submodule.path] = flat_f.fvu.cpu().save()
-                    batch_multi_topk_fvus[submodule.path] = flat_f.multi_topk_fvu.cpu().save()
+            for submodule, input in inputs.items():
+                permuted_dims = instance_dims + feature_dims
+                sae_input = input.permute(*permuted_dims)
+                sae_input = sae_input.flatten(0, len(instance_dims) - 1)
+                sae_input = sae_input.flatten(1, len(feature_dims))
 
-                    latent_acts = flat_f.latent_acts.view(input.shape[0], input.shape[1], -1)
-                    latent_indices = flat_f.latent_indices.view(input.shape[0], input.shape[1], -1)
-                    dense = to_dense(latent_acts, latent_indices, num_latents) # type: ignore
-                    batch_nodes[submodule.path] = dense.cpu().save() # type: ignore
-            
-            for submodule in ordered_submods:
-                if aggregate: 
-                    batch_nodes[submodule.path] = batch_nodes[submodule.path].mean(dim=1)
+                flat_f = dictionaries[submodule].forward(sae_input)
 
-                accumulated_nodes[submodule.path] += batch_nodes[submodule.path].double()
-                accumulated_fvu[submodule.path] += batch_fvus[submodule.path].item()
-                accumulated_multi_topk_fvu[submodule.path] += batch_multi_topk_fvus[submodule.path].item()
-                
-            acts = torch.cat([batch_nodes[submodule.path] for submodule in ordered_submods], dim=0)
-            if act_callback is not None:
-                callback_accumulator = act_callback(acts, callback_accumulator)
+                num_latents = dictionaries[submodule].num_latents
+                num_instances = 1
+                for i in instance_dims:
+                    num_instances *= sae_input.shape[i]
 
-            total_samples += batch_size
+                mean_acts = torch.zeros(
+                    num_instances,
+                    num_latents,
+                    device=flat_f.latent_acts.device,
+                    dtype=flat_f.latent_acts.dtype,
+                    requires_grad=True,
+                )
+                mean_acts.scatter_(-1, flat_f.latent_indices.long(), flat_f.latent_acts)
+
+                mean_acts = mean_acts.mean(0).to(torch.float64).cpu()  # type: ignore
+
+                accumulated_nodes[submodule.path] += mean_acts  # type: ignore
+                accumulated_fvu[submodule.path] += flat_f.fvu.cpu().item()  # type: ignore
+                accumulated_multi_topk_fvu[submodule.path] += flat_f.multi_topk_fvu.cpu().item()  # type: ignore
+                accumulated_sample_count[submodule.path] += sae_input.shape[0]
+
             num_batches += 1
 
-    nodes = {k: v.sum(0) / total_samples for k, v in accumulated_nodes.items()}
+    print("Accumulating")
+    nodes = {
+        k: v / sample_count
+        for (k, v), sample_count in zip(
+            accumulated_nodes.items(), accumulated_sample_count.values()
+        )
+    }
     fvu = {k: v / num_batches for k, v in accumulated_fvu.items()}
     multi_topk_fvu = {k: v / num_batches for k, v in accumulated_multi_topk_fvu.items()}
 
+    return nodes, fvu, multi_topk_fvu
 
-    return nodes, fvu, multi_topk_fvu, callback_accumulator
+
+@torch.no_grad()
+def stream_sae_acts(
+    model,
+    ordered_submods: list,
+    dictionaries: dict[Any, Sae],
+    dataloader: DataLoader,
+    device: str | torch.device = torch.device("cuda"),
+    input_key: str = "input_ids",
+    feature_dims=[2],
+    instance_dims=[0, 1],
+    collect=True,
+):
+    """Meaned over a large dataset"""
+    is_tuple = {}
+    first_batch = next(iter(dataloader))
+    batch_size = first_batch[input_key].shape[0]
+    accumulated_nodes = defaultdict(list)
+    with model.scan(first_batch[input_key].to(device)):
+        for submodule in ordered_submods:
+            output = (
+                submodule.nns_output
+                if hasattr(submodule, "nns_output")
+                else submodule.output
+            )
+            is_tuple[submodule] = type(output.shape) == tuple
+
+    accumulated_fvu = defaultdict(list)
+    accumulated_multi_topk_fvu = defaultdict(list)
+    metrics = defaultdict(list)
+
+    with torch.amp.autocast(str(device)):
+        for batch in dataloader:
+            inputs = {}
+            with model.trace(batch[input_key].to(device)):
+                for submodule in ordered_submods:
+                    if hasattr(submodule, "nns_output"):
+                        input = (
+                            submodule.nns_output
+                            if not is_tuple[submodule]
+                            else submodule.nns_output[0]
+                        )
+                    else:
+                        input = (
+                            submodule.output
+                            if not is_tuple[submodule]
+                            else submodule.output[0]
+                        )
+                    inputs[submodule] = input.save()
+
+            for submodule, input in inputs.items():
+                permuted_dims = instance_dims + feature_dims
+                sae_input = input.permute(*permuted_dims)
+                sae_input = sae_input.flatten(0, len(instance_dims) - 1)
+                sae_input = sae_input.flatten(1, len(feature_dims))
+
+                flat_f = dictionaries[submodule].forward(sae_input)
+
+                accumulated_fvu[submodule.path].append(flat_f.fvu.cpu().item())
+                accumulated_multi_topk_fvu[submodule.path].append(
+                    flat_f.multi_topk_fvu.cpu().item()
+                )
+
+                original_instance_shape = [input.shape[i] for i in instance_dims]
+                latent_acts = flat_f.latent_acts.view(*original_instance_shape, -1)
+                latent_indices = flat_f.latent_indices.view(
+                    *original_instance_shape, -1
+                )
+                dense = to_dense(
+                    latent_acts,  # type: ignore
+                    latent_indices,  # type: ignore
+                    dictionaries[submodule].num_latents,
+                    instance_dims=instance_dims,
+                )
+
+                accumulated_nodes[submodule.path].append(dense.cpu().double())  # type: ignore
+
+            # ultra long vector with all sae features
+            flattened_acts = {
+                submodule: flatten_acts(
+                    accumulated_nodes[submodule.path][-1],
+                    instance_dims,
+                    (accumulated_nodes[submodule.path][-1].ndim - 1,), # type: ignore
+                )
+                for submodule in ordered_submods
+            }
+            # Handle Swin edge case where batch size is not preserved, by folding the excess batch size
+            # into the instance dimension
+            for key, flattened_act in flattened_acts.items():
+                if flattened_act.shape[0] != batch_size:
+                    n = flattened_act.shape[0] // batch_size
+                    feature_len = flattened_act.shape[-1]
+                    flattened_acts[key] = flattened_act.view(
+                        batch_size, n, feature_len
+                    ).view(batch_size, feature_len * n)
+
+            acts = torch.cat([a for a in flattened_acts.values()], dim=1)
+            metrics = get_batch_metrics(
+                acts, metrics, feature_dims=feature_dims, instance_dims=instance_dims
+            )
+
+            if not collect:
+                for submodule in ordered_submods:
+                    accumulated_nodes[submodule.path] = []
+
+    return accumulated_nodes, accumulated_fvu, accumulated_multi_topk_fvu, metrics
 
 
-def get_metrics(
-    model, 
+def get_sae_metrics(
+    model,
     nnsight_model,
     dictionaries: dict,
-    all_submods: list,
-    train_dl, 
-    test_dl, 
-    seq_len: int,
-    feature_dims=[1],
-    instance_dims=[0]
-
+    submods: list,
+    dataloaders: dict[str, DataLoader],
+    feature_dims=(1,),
+    instance_dims=(0,),
+    device=torch.device("cuda"),
 ):
     metrics: dict[str, Any] = {}
 
-    metrics['parameter_norm'] = torch.cat([parameters.flatten() for parameters in model.parameters()]).flatten().norm(p=2).item()
-
-    mean_nodes, fvu, multi_topk_fvu, metrics = get_sae_acts(
-        nnsight_model, all_submods, dictionaries, 
-        train_dl, aggregate=True, input_key='input_ids',
-        seq_len=seq_len, act_callback=partial(get_batch_metrics, feature_dims=feature_dims, instance_dims=instance_dims)
-
+    metrics["parameter_norm"] = (
+        torch.cat([parameters.flatten() for parameters in model.parameters()])
+        .flatten()
+        .norm(p=2)
+        .item()
     )
-    mean_node_scores = concatenate_values(
-        mean_nodes)
 
-    mean_fvu = np.mean([v for v in fvu.values()])
-    mean_multi_topk_fvu = np.mean([v for v in multi_topk_fvu.values()])
+    for dataloader_name, dataloader in dataloaders.items():
+        dataloader_metrics = {}
 
-    metrics['sae_entropy_nodes'] = {'nodes': mean_nodes}   
+        mean_acts, fvu, multi_topk_fvu = get_mean_sae_acts(
+            nnsight_model,
+            submods,
+            dictionaries,
+            dataloader,
+            input_key="input_ids",
+            feature_dims=feature_dims,
+            instance_dims=instance_dims,
+            device=device,
+        )
+        mean_acts_vec = concatenate_values(mean_acts)
 
-    metrics['sae_fvu'] = mean_fvu
-    metrics['sae_multi_topk_fvu'] = mean_multi_topk_fvu
+        mean_fvu = np.mean([v for v in fvu.values()])
+        mean_multi_topk_fvu = np.mean([v for v in multi_topk_fvu.values()])
 
-    metrics['sae_entropy'] = abs_entropy(mean_node_scores)
-    metrics['hoyer'] = hoyer(mean_node_scores)
-    metrics['hoyer_square'] = hoyer_square(mean_node_scores)
-    metrics['gini'] = gini(mean_node_scores)
-    metrics['mean_l2'] = metrics['mean_l2']
-    metrics['var_l2'] = metrics['var_l2']
-    metrics['skew_l2'] = metrics['skew_l2'] 
-    metrics['kurt_l2'] = metrics['kurt_l2']
-    metrics['var_trace'] = metrics['var_trace']
+        dataloader_metrics: dict[str, Any] = {"nodes": mean_acts}
 
-    del mean_node_scores, mean_nodes, fvu, multi_topk_fvu
+        dataloader_metrics["sae_fvu"] = mean_fvu
+        dataloader_metrics["sae_multi_topk_fvu"] = mean_multi_topk_fvu
 
-    test_nodes, test_fvu, test_multi_topk_fvu, running_metrics = get_sae_acts(
-        nnsight_model, all_submods, dictionaries, 
-        test_dl, aggregate=True, seq_len=seq_len, act_callback=get_batch_metrics
-    )
-    metrics['test_sae_fvu'] = np.mean([v for v in test_fvu.values()])
-    metrics['test_sae_multi_topk_fvu'] = np.mean([v for v in test_multi_topk_fvu.values()])
-    metrics['test_sae_entropy_nodes'] = {'nodes': test_nodes}   
+        dataloader_metrics["sae_entropy"] = abs_entropy(mean_acts_vec)
+        dataloader_metrics["hoyer"] = hoyer(mean_acts_vec)
+        dataloader_metrics["hoyer_square"] = hoyer_square(mean_acts_vec)
+        dataloader_metrics['gini'] = gini(mean_acts_vec)
 
-    mean_test_nodes = {k: v.mean(dim=0) for k, v in test_nodes.items()}
-    mean_test_node_scores = concatenate_values(mean_test_nodes)
+        _, _, _, batch_metrics = stream_sae_acts(
+            nnsight_model,
+            submods,
+            dictionaries,
+            dataloader,
+            input_key="input_ids",
+            feature_dims=feature_dims,
+            instance_dims=instance_dims,
+            device=device,
+            collect=False,
+        )
 
-    metrics['test_sae_entropy'] = abs_entropy(mean_test_node_scores)
-    metrics['test_hoyer'] = hoyer(mean_test_node_scores)
-    metrics['test_hoyer_square'] = hoyer_square(mean_test_node_scores)
-    metrics['test_gini'] = gini(mean_test_node_scores)
+        dataloader_metrics["mean_l2"] = batch_metrics["mean_l2"]
+        dataloader_metrics["var_l2"] = batch_metrics["var_l2"]
+        dataloader_metrics["skew_l2"] = batch_metrics["skew_l2"]
+        dataloader_metrics["kurt_l2"] = batch_metrics["kurt_l2"]
+        dataloader_metrics["var_trace"] = batch_metrics["var_trace"]
 
-    metrics['test_mean_l2'] = running_metrics['mean_l2']
-    metrics['test_var_l2'] = running_metrics['var_l2']
-    metrics['test_skew_l2'] = running_metrics['skew_l2']
-    metrics['test_kurt_l2'] = running_metrics['kurt_l2']
-    metrics['test_var_trace'] = running_metrics['var_trace']
+        metrics[dataloader_name] = dataloader_metrics
 
     return metrics

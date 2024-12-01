@@ -18,7 +18,7 @@ import lovely_tensors as lt
 from ngrams_across_time.utils.utils import set_seeds
 from ngrams_across_time.clearnets.transformers import CustomTransformer
 
-from ngrams_across_time.clearnets.inference.inference import get_metrics
+from ngrams_across_time.clearnets.inference.inference import get_sae_metrics
 from ngrams_across_time.clearnets.plot.plot_modular_addition_grok import plot_modular_addition_grok
 
 import plotly.io as pio
@@ -111,6 +111,11 @@ def inference(args):
 
     model = CustomTransformer(config)
 
+    dataloaders = {
+        'train': train_dl,
+        'test': test_dl
+    }
+
     # NNSight requires a tokenizer. We are passing in tensors so any tokenizer will do
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
@@ -158,14 +163,12 @@ def inference(args):
         # Collect metrics
         checkpoint_data[epoch]['train_loss'] = compute_losses(model, train_dl, device)
         checkpoint_data[epoch]['test_loss'] = compute_losses(model, test_dl, device)
-        checkpoint_data[epoch].update(get_metrics(
+        checkpoint_data[epoch].update(get_sae_metrics(
             model, 
             nnsight_model, 
             dictionaries, 
             all_submods, 
-            train_dl, 
-            test_dl, 
-            len(train_data[0])
+            dataloaders
         ))
         torch.save(checkpoint_data, OUT_PATH)
 

@@ -50,6 +50,7 @@ class LogSpacedCheckpoint(ModelCheckpoint):
         
         return False
     
+
 class ScheduleFreeLightningWrapper(pl.LightningModule):
     """
     PyTorch Lightning wrapper for Hugging Face models that uses the AdamW schedule-free optimizer.
@@ -67,12 +68,19 @@ class ScheduleFreeLightningWrapper(pl.LightningModule):
     def train(self, mode: bool = True) -> None:
         """Set the model to training mode"""
         self.model.train(mode)
-        self.optimizers().train()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.train(mode)
 
     def eval(self) -> None:
         """Set the model to evaluation mode"""
         self.model.eval()
-        self.optimizers().eval()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.eval()
     
     def training_step(self, batch, batch_idx):
         x = batch[0]
@@ -101,23 +109,45 @@ class ScheduleFreeLightningWrapper(pl.LightningModule):
 
     def on_validation_model_eval(self) -> None:
         self.model.eval()
-        self.optimizers().eval()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.eval()
 
     def on_validation_model_train(self) -> None:
         self.model.train()
-        self.optimizers().train()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.train()
 
     def on_test_model_eval(self) -> None:
         self.model.eval()
-        self.optimizers().eval()
+        optimizer = self.optimizers()
+        
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.eval()
 
     def on_test_model_train(self) -> None:
         self.model.train()
-        self.optimizers().train()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.train()
+
 
     def on_predict_model_eval(self) -> None:  # redundant with on_predict_start()
         self.model.eval()
-        self.optimizers().eval()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.eval()
     
     def configure_optimizers(self):
         self.optimizer = AdamWScheduleFree(
@@ -130,3 +160,4 @@ class ScheduleFreeLightningWrapper(pl.LightningModule):
         return {
             "optimizer": self.optimizer,
         }
+    

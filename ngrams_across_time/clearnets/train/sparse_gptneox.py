@@ -74,8 +74,8 @@ class SparseMLP(nn.Module):
         super().__init__()
         embed_dim = config.hidden_size
         self.k = config.k
-        self.c_fc = nn.Linear(embed_dim, intermediate_size)
-        self.c_proj = nn.Linear(intermediate_size, embed_dim)
+        self.c_fc = nn.Linear(embed_dim, intermediate_size * 8)
+        self.c_proj = nn.Linear(intermediate_size * 8, embed_dim)
         self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(float(config.resid_dropout))
 

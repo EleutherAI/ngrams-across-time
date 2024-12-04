@@ -106,13 +106,18 @@ def restrict_tokenizer_vocab(base_tokenizer, dataset, max_vocab_size: int = 10_0
     
     return new_tokenizer
 
-tiny_stories_33m_config = {
+tiny_stories_8m_config = {
+  "_name_or_path": "//amlta41566503acb2986203fbd2fc58f9ff6/projects/CODE_YUANZHI/amlt-results/7318563093.69241-46ef7114-0cc8-4d54-8d19-c1863a28eb04/trainer_textbook/checkpoint-25750/",
   "activation_function": "gelu_new",
   "architectures": [
     "GPTNeoForCausalLM"
   ],
   "attention_dropout": 0,
   "attention_layers": [
+    "global",
+    "local",
+    "global",
+    "local",
     "global",
     "local",
     "global",
@@ -124,21 +129,21 @@ tiny_stories_33m_config = {
         "global",
         "local"
       ],
-      2
+      4
     ]
   ],
   "bos_token_id": 50256,
   "embed_dropout": 0,
   "eos_token_id": 50256,
   "gradient_checkpointing": False,
-  "hidden_size": 768,
+  "hidden_size": 256,
   "initializer_range": 0.02,
   "intermediate_size": None,
   "layer_norm_epsilon": 1e-05,
   "max_position_embeddings": 2048,
   "model_type": "gpt_neo",
   "num_heads": 16,
-  "num_layers": 4,
+  "num_layers": 8,
   "resid_dropout": 0,
   "summary_activation": None,
   "summary_first_dropout": 0.1,
@@ -146,10 +151,57 @@ tiny_stories_33m_config = {
   "summary_type": "cls_index",
   "summary_use_proj": True,
   "torch_dtype": "float32",
+  "transformers_version": "4.28.1",
   "use_cache": True,
   "vocab_size": 50257,
   "window_size": 256
 }
+
+
+# tiny_stories_33m_config = {
+#   "activation_function": "gelu_new",
+#   "architectures": [
+#     "GPTNeoForCausalLM"
+#   ],
+#   "attention_dropout": 0,
+#   "attention_layers": [
+#     "global",
+#     "local",
+#     "global",
+#     "local"
+#   ],
+#   "attention_types": [
+#     [
+#       [
+#         "global",
+#         "local"
+#       ],
+#       2
+#     ]
+#   ],
+#   "bos_token_id": 0, # 50256,
+#   "embed_dropout": 0,
+#   "eos_token_id": 0, # 50256,
+#   "gradient_checkpointing": False,
+#   "hidden_size": 768,
+#   "initializer_range": 0.02,
+#   "intermediate_size": 3072,
+#   "layer_norm_epsilon": 1e-05,
+#   "max_position_embeddings": 512, # 2048
+#   "model_type": "gpt_neo",
+#   "num_heads": 16,
+#   "num_layers": 4,
+#   "resid_dropout": 0,
+#   "summary_activation": None,
+#   "summary_first_dropout": 0.1,
+#   "summary_proj_to_labels": True,
+#   "summary_type": "cls_index",
+#   "summary_use_proj": True,
+#   "torch_dtype": "float32",
+#   "use_cache": True,
+#   "vocab_size": 50257,
+#   "window_size": 256
+# }
 
 
 class TinyStoriesModel(pl.LightningModule):
@@ -163,11 +215,11 @@ class TinyStoriesModel(pl.LightningModule):
         self.adam_beta2 = 0.95
         self.tokenizer = tokenizer
 
-        self.config = SparseGPTNeoConfig(**tiny_stories_33m_config, sparse_mlp=not dense) # max_position_embeddings=context_length
+        self.config = SparseGPTNeoConfig(**tiny_stories_8m_config, sparse_mlp=not dense) # max_position_embeddings=context_length
         self.model = SparseGPTNeoForCausalLM(self.config) 
 
-        self.train_acc = tm.Accuracy("multiclass", num_classes=tiny_stories_33m_config["vocab_size"])
-        self.val_acc = tm.Accuracy("multiclass", num_classes=tiny_stories_33m_config["vocab_size"])
+        self.train_acc = tm.Accuracy("multiclass", num_classes=tiny_stories_8m_config["vocab_size"])
+        self.val_acc = tm.Accuracy("multiclass", num_classes=tiny_stories_8m_config["vocab_size"])
 
 
     def forward(self, input_ids, attention_mask):
@@ -195,7 +247,8 @@ class TinyStoriesModel(pl.LightningModule):
         if self.global_rank == 0:
             device = next(self.parameters()).device
             sample_input = torch.tensor([[self.tokenizer.bos_token_id]], device=device)
-            sample_output = self.model.generate(sample_input, max_new_tokens=99)
+            # sample_output = self.model.generate(sample_input, max_new_tokens=99)
+            sample_output = self.model.generate(sample_input, attention_mask=torch.ones_like(sample_input), max_new_tokens=99)
             sample_str = self.tokenizer.decode(sample_output[0], skip_special_tokens=True)
             print(f"\nEpoch {self.current_epoch} sample:", sample_str)
 
@@ -214,9 +267,16 @@ def parse_args():
 
 def main():
     args = parse_args()
+    size = "8"
+
+    if args.dense:
+        sparse_batch_size_scalar = 1
+    else:
+        sparse_batch_size_scalar = 1
+    
     # From https://huggingface.co/roneneldan/TinyStories-33M
-    batch_size = 80
-    gradient_accumulation_steps = 16
+    batch_size = 80 * sparse_batch_size_scalar
+    gradient_accumulation_steps = 16 // sparse_batch_size_scalar
 
     # Load dataset from ronan's HF
     train_dataset = load_dataset("roneneldan/TinyStories")["train"]
@@ -234,7 +294,7 @@ def main():
     else:
         tokenizer = AutoTokenizer.from_pretrained("data/tinystories/restricted_tokenizer_v2")
 
-    tiny_stories_33m_config["vocab_size"] = tokenizer.vocab_size
+    tiny_stories_8m_config["vocab_size"] = tokenizer.vocab_size
     model = TinyStoriesModel(args.dense, tokenizer)
     model.cuda()
 
@@ -264,13 +324,12 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=16)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
     
-    checkpoint_callback = ModelCheckpoint(dirpath="data/tinystories/checkpoints", save_top_k=1, monitor="val_loss", mode="min", every_n_epochs=1)
+    checkpoint_callback = ModelCheckpoint(dirpath=f"data/tinystories-{size}/checkpoints", save_top_k=-1, monitor="val_loss", mode="min", every_n_epochs=1, save_last=True)
     wandb_logger = WandbLogger(project="tinystories", log_model=True)
 
     trainer = pl.Trainer(
         accelerator="auto",
-        max_epochs=30,
-        # devices="auto",
+        max_epochs=10,
         devices=[3, 4, 5, 6] if not args.debug else [3],
         callbacks=[checkpoint_callback],
         logger=wandb_logger if not args.debug else None,

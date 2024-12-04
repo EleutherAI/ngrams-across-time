@@ -129,7 +129,7 @@ def create_matched_models(image_size=32, num_labels=10):
     vit_model = ViTForImageClassification(vit_config)
 
     models = {
-        'ConvNeXtV2': convnext_model,
+        # 'ConvNeXtV2': convnext_model,
         'Swin': swin_model,
         'ViT': vit_model
     }

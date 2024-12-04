@@ -269,9 +269,9 @@ def main():
 
     trainer = pl.Trainer(
         accelerator="auto",
-        # devices="auto",
         max_epochs=30,
-        devices=[0, 1, 2, 3, 4, 5, 6, 7] if not args.debug else [3],
+        # devices="auto",
+        devices=[3, 4, 5, 6] if not args.debug else [3],
         callbacks=[checkpoint_callback],
         logger=wandb_logger if not args.debug else None,
         gradient_clip_val=1.0,

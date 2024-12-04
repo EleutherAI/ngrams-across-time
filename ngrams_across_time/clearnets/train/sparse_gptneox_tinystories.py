@@ -1,0 +1,272 @@
+from collections import Counter
+import json
+import os
+from argparse import ArgumentParser
+import torch
+from transformers import PreTrainedTokenizerFast
+from torch.utils.data import DataLoader
+from datasets import load_dataset
+import pytorch_lightning as pl
+import numpy as np
+from typing import Optional, Tuple
+from tokenizers import Tokenizer, models
+
+
+from pathlib import Path
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.loggers import WandbLogger
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
+from datasets import Dataset as HFDataset
+from transformers import AutoTokenizer
+import lovely_tensors as lt
+
+lt.monkey_patch()
+
+from ngrams_across_time.clearnets.train.sparse_gptneox import SparseGPTNeoConfig, SparseGPTNeoForCausalLM
+
+torch.set_float32_matmul_precision('high')
+
+def restrict_tokenizer_vocab(base_tokenizer, dataset, max_vocab_size: int = 10_000, save_path: Optional[str] = None):
+    """
+    Restrict a GPT-NeoX tokenizer's vocabulary to the most common tokens in a dataset while preserving
+    whitespace handling and token uniqueness.
+    
+    Args:
+        base_tokenizer: The GPT-NeoX tokenizer to restrict
+        dataset: HuggingFace dataset containing text data
+        max_vocab_size: Maximum number of tokens to keep
+        save_path: Optional path to save the modified tokenizer
+    """
+    from tokengrams import MemmapIndex, tokenize_hf_dataset
+    from copy import deepcopy
+
+    original_vocab = base_tokenizer.get_vocab()
+    original_tokens = {v: k for k, v in original_vocab.items()}
+    
+    # Count token frequencies
+    if not os.path.exists("tinystories.bin"):
+        print("Tokenizing dataset...")
+        tokenize_hf_dataset(
+            dataset=load_dataset("roneneldan/TinyStories", split='train'),
+            tokenizer=base_tokenizer,
+            output_path="tinystories.bin",
+            text_key="text",
+            append_eod=True,
+            workers=10,
+        )
+        index = MemmapIndex.build("tinystories.bin", "tinystories.idx")
+    else:
+        print("Loading index...")
+        index = MemmapIndex("tinystories.bin", "tinystories.idx")
+
+    print("Counting tokens...")
+    token_counts = index.count_next([])
+    
+    # Get most common token IDs
+    most_common_token_ids = torch.topk(torch.tensor(token_counts), k=max_vocab_size).indices.tolist()
+    
+    # Create new vocabulary preserving original token strings
+    new_vocab = {}
+    current_id = 0
+    
+    # First add special tokens
+    special_token = "<|endoftext|>"
+    new_vocab[special_token] = current_id
+    current_id += 1
+    
+    for token_id in most_common_token_ids:
+        if token_id < len(original_tokens):
+            token_string = original_tokens[token_id]
+            if token_string not in new_vocab and token_string != special_token:
+                new_vocab[token_string] = current_id
+                current_id += 1
+    
+    # Create tokenizer with new vocab and backend mimicking the original
+    tokenizer_backend = deepcopy(base_tokenizer.backend_tokenizer)
+    tokenizer_config = tokenizer_backend.model
+    tokenizer_backend.model = models.BPE(
+        vocab=new_vocab,
+        merges=[],
+        dropout=tokenizer_config.dropout,
+        unk_token=base_tokenizer.unk_token,
+        continuing_subword_prefix=tokenizer_config.continuing_subword_prefix,
+        end_of_word_suffix=tokenizer_config.end_of_word_suffix,
+        fuse_unk=tokenizer_config.fuse_unk,
+    )
+    new_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer_backend,
+        bos_token="<|endoftext|>",
+        eos_token="<|endoftext|>",
+        unk_token="<|endoftext|>",
+        pad_token="<|endoftext|>",
+        add_prefix_space=False,
+        trim_offsets=True  # Changed to True to better handle whitespace
+    )
+    
+    if save_path:
+        new_tokenizer.save_pretrained(save_path)
+    
+    return new_tokenizer
+
+tiny_stories_33m_config = {
+  "activation_function": "gelu_new",
+  "architectures": [
+    "GPTNeoForCausalLM"
+  ],
+  "attention_dropout": 0,
+  "attention_layers": [
+    "global",
+    "local",
+    "global",
+    "local"
+  ],
+  "attention_types": [
+    [
+      [
+        "global",
+        "local"
+      ],
+      2
+    ]
+  ],
+  "bos_token_id": 50256,
+  "embed_dropout": 0,
+  "eos_token_id": 50256,
+  "gradient_checkpointing": False,
+  "hidden_size": 768,
+  "initializer_range": 0.02,
+  "intermediate_size": None,
+  "layer_norm_epsilon": 1e-05,
+  "max_position_embeddings": 512, # 2048,
+  "model_type": "gpt_neo",
+  "num_heads": 16,
+  "num_layers": 4,
+  "resid_dropout": 0,
+  "summary_activation": None,
+  "summary_first_dropout": 0.1,
+  "summary_proj_to_labels": True,
+  "summary_type": "cls_index",
+  "summary_use_proj": True,
+  "torch_dtype": "float32",
+  "use_cache": True,
+  "vocab_size": 50257,
+  "window_size": 256
+}
+
+
+class TinyStoriesModel(pl.LightningModule):
+    def __init__(self, dense: bool):
+        super().__init__()
+        # From https://huggingface.co/roneneldan/TinyStories-33M
+        # lr_scheduler = "constant"
+        self.learning_rate = 5e-4
+        self.weight_decay = 0.1
+        self.adam_beta1 = 0.9
+        self.adam_beta2 = 0.95
+
+        self.config = SparseGPTNeoConfig(**tiny_stories_33m_config, sparse_mlp=not dense) # max_position_embeddings=context_length
+        self.model = SparseGPTNeoForCausalLM(self.config) 
+
+    def forward(self, input_ids, attention_mask):
+        return self.model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+
+    def training_step(self, batch, batch_idx):
+        outputs = self.forward(**batch)
+        return outputs.loss
+
+    def validation_step(self, batch, batch_idx):
+        outputs = self.forward(**batch)
+        self.log("val_loss", outputs.loss, prog_bar=True)
+
+    def configure_optimizers(self):
+        self.optimizer = AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay, betas=(self.adam_beta1, self.adam_beta2))
+        return {
+            "optimizer": self.optimizer,
+        }
+
+def parse_args():
+    parser = ArgumentParser()
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--dense", action="store_true")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    # From https://huggingface.co/roneneldan/TinyStories-33M
+    sae_batch_size_scale_down = 1
+    batch_size = 80 // sae_batch_size_scale_down
+    gradient_accumulation_steps = 16 * sae_batch_size_scale_down
+
+    if not os.path.exists("data/tinystories/restricted_tokenizer_v2"):
+        tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-2.7B")
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer = restrict_tokenizer_vocab(
+            tokenizer,
+            dataset=train_dataset,
+            max_vocab_size=10_000,
+            save_path="data/tinystories/restricted_tokenizer_v2"
+        )
+    else:
+        tokenizer = AutoTokenizer.from_pretrained("data/tinystories/restricted_tokenizer_v2")
+
+    # Load dataset from ronan's HF
+    train_dataset = load_dataset("roneneldan/TinyStories")["train"]
+    val_dataset = load_dataset("roneneldan/TinyStories")["validation"]
+
+    tiny_stories_33m_config["vocab_size"] = tokenizer.vocab_size
+    model = TinyStoriesModel(args.dense)
+    model.cuda()
+
+    def tokenize(examples):
+        return tokenizer(
+            examples["input_ids"],
+            truncation=True,
+            max_length=512,
+            padding="max_length",
+            return_tensors="pt"
+        )
+
+    # Convert to HF format
+    train_dataset = HFDataset.from_dict({
+        "input_ids": train_dataset["text"],
+        "attention_mask": [1] * len(train_dataset["text"])
+    })
+    train_dataset = train_dataset.map(tokenize, batched=True, cache_file_name="data/tinystories/train_dataset_v2.cache")
+    train_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
+    val_dataset = HFDataset.from_dict({
+        "input_ids": val_dataset["text"],
+        "attention_mask": [1] * len(val_dataset["text"])
+    })
+    val_dataset = val_dataset.map(tokenize, batched=True, cache_file_name="data/tinystories/val_dataset_v2.cache")
+    val_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
+
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=16)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
+    
+    checkpoint_callback = ModelCheckpoint(dirpath="data/tinystories/checkpoints", save_top_k=1, monitor="val_loss", mode="min")
+    wandb_logger = WandbLogger(project="tinystories", log_model=True)
+
+    trainer = pl.Trainer(
+        accelerator="auto",
+        # devices="auto",
+        max_epochs=30,
+        devices=[3, 4, 5, 6] if not args.debug else [3],
+        callbacks=[checkpoint_callback],
+        logger=wandb_logger if not args.debug else None,
+        gradient_clip_val=1.0,
+        accumulate_grad_batches=gradient_accumulation_steps,  # Effective batch size = 80 * 16 = 1280
+    )
+
+    trainer.fit(model, train_loader, val_loader)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        import pdb
+        pdb.post_mortem()
+

@@ -1,4 +1,5 @@
 
+# Probably superseded by cifar10 vision which runs inference on three models and a harder dataset
 from pathlib import Path
 
 from plotly.subplots import make_subplots

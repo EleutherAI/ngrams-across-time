@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 from pathlib import Path
 from functools import partial
+from collections import defaultdict
 
 import torch.nn.functional as F
 import torch
@@ -18,6 +19,7 @@ from ngrams_across_time.utils.utils import set_seeds
 from ngrams_across_time.language.hf_client import get_model_checkpoints
 from ngrams_across_time.clearnets.inference.inference import get_sae_metrics
 from ngrams_across_time.clearnets.plot.plot_pythia import plot_pythia
+from ngrams_across_time.clearnets.metrics import network_compression, singular_values
 
 
 pio.kaleido.scope.mathjax = None  # https://github.com/plotly/plotly.py/issues/3469
@@ -70,7 +72,8 @@ def load_pythia_dictionaries(nnsight_model, step_number: str, sae_path: Path, mo
 
     return dictionaries, resids
     
-    
+
+@torch.no_grad()
 def main():
     images_path = Path("images")
     images_path.mkdir(exist_ok=True)
@@ -105,7 +108,13 @@ def main():
 
     load_dictionaries = partial(load_pythia_dictionaries, sae_path=sae_path)
 
-
+    initial_model = AutoModelForCausalLM.from_pretrained(
+        f"EleutherAI/{model_name}",
+        torch_dtype=torch.float16,
+        revision=f"step{log2_keys[0]}",
+        cache_dir=".cache",
+        quantization_config=BitsAndBytesConfig(load_in_8bit=True) if "12b" in model_name else None
+    )
 
     for step_number, checkpoint in tqdm(log_checkpoints.items()):
         if step_number not in checkpoint_data:
@@ -130,23 +139,47 @@ def main():
 
         dictionaries, all_submods = load_dictionaries(nnsight_model, step_number)
 
-        checkpoint_data[step_number]['train_loss'] = compute_losses(model, train_dl, device)
-        checkpoint_data[step_number]['test_loss'] = compute_losses(model, test_dl, device)
-        checkpoint_data[step_number].update(get_sae_metrics(
-            model, 
-            nnsight_model,
-            dictionaries,
-            all_submods,
-            dataloaders,
-            feature_dims=[2],
-            instance_dims=[0, 1],
-        ))
+        if not args.debug:
+            checkpoint_data[step_number]['train_loss'] = compute_losses(model, train_dl, device)
+            checkpoint_data[step_number]['test_loss'] = compute_losses(model, test_dl, device)
+            metrics, activations = get_sae_metrics(
+                model, 
+                nnsight_model,
+                dictionaries,
+                all_submods,
+                dataloaders,
+                feature_dims=[2],
+                instance_dims=[0, 1],
+            )
+            checkpoint_data[step_number].update(metrics)
+
+        layer_metrics = defaultdict(list)
+        for i, submod in enumerate(model.gpt_neox.layers):
+            parameters_initial = initial_model.gpt_neox.layers[i].attention.dense.weight.to(device)
+            parameters_final = submod.attention.dense.weight
+
+            layer_metrics["attn_layer_ranks"].append(network_compression(parameters_final, parameters_initial))
+            layer_metrics["attn_max_rank"].append(min(parameters_final.size()))
+            layer_metrics["attn_diff_singular_values"].append(singular_values(parameters_final - parameters_initial))
+            layer_metrics["attn_singular_values"].append(singular_values(parameters_final))
+            layer_metrics["attn_layer_norms"].append(torch.linalg.matrix_norm(parameters_final).item())
+
+            parameters_initial = initial_model.gpt_neox.layers[i].mlp.dense_4h_to_h.weight.to(device).data
+            parameters_final = submod.mlp.dense_4h_to_h.weight
+            
+            layer_metrics["mlp_layer_ranks"].append(network_compression(parameters_final, parameters_initial))
+            layer_metrics["mlp_max_rank"].append(min(parameters_final.size()))
+            layer_metrics["mlp_diff_singular_values"].append(singular_values(parameters_final - parameters_initial))
+            layer_metrics["mlp_singular_values"].append(singular_values(parameters_final))
+            layer_metrics["mlp_layer_norms"].append(torch.linalg.matrix_norm(parameters_final).item())
+            
+        checkpoint_data[step_number].update(layer_metrics)
 
         torch.save(checkpoint_data, OUT_PATH)
     torch.save(checkpoint_data, OUT_PATH)
     
     if args.plot:
-        plot_pythia(OUT_PATH, log_checkpoints, test_early_index)
+        plot_pythia(test_early_index)
     
 if __name__ == "__main__":
     main()

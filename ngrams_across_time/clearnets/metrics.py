@@ -80,7 +80,7 @@ def mean_matched_cosine_similarity(first: ndarray, second: ndarray) -> float:
     
     return 1 - cost_matrix[row_ind, col_ind].mean()
 
-def rank(tensor: Tensor):
+def network_compression(parameters: Tensor, parameters_initial: Tensor):    
     # TODO this might be wrong or inefficient, epistemic status: draft
 
     # SVD-based network compression seems like a good candidate for a generalisation measure
@@ -88,5 +88,11 @@ def rank(tensor: Tensor):
     # in the grokking regime with high weight decay you may want to do the weight matrix itself
     # if you were doing an actual encoding scheme you could just add an extra bit to indicate which you're using
 
-    return torch.linalg.matrix_rank(tensor)
-    # effective network rank
+    diff = parameters - parameters_initial
+    rank = torch.linalg.matrix_rank(diff.float(), atol=1e-2).item()
+    # print(rank)
+    return rank
+
+
+def singular_values(tensor: Tensor) -> list[float]:
+    return torch.linalg.svdvals(tensor.float()).cpu().tolist()

@@ -165,8 +165,6 @@ def inference(model_path: Path, out_path: Path, sae_path: Path):
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
-    num_patches = (config.image_size // config.patch_size) ** 2 + 1 # +1 for the class token
-
     load_dictionaries = partial(load_mnist_vit_dictionaries, sae_train_dataset=sae_train_dataset, sae_path=sae_path)
 
     checkpoint_data = torch.load(out_path) if out_path.exists() else {}
@@ -188,13 +186,14 @@ def inference(model_path: Path, out_path: Path, sae_path: Path):
 
         checkpoint_data[epoch]['train_loss'] = compute_losses(model, train_dl, device)
         checkpoint_data[epoch]['test_loss'] = compute_losses(model, test_dl, device)
-        checkpoint_data[epoch].update(get_sae_metrics(
+        metrics, activations = get_sae_metrics(
             model, 
             nnsight_model,
             dictionaries,
             all_submods,
             dataloaders,
-        ))
+        )
+        checkpoint_data[epoch].update(metrics)
 
         torch.save(checkpoint_data, out_path)
 

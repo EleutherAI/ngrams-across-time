@@ -9,7 +9,8 @@ from torch import Tensor
 from sae.sae import Sae
 from torch.utils.data import DataLoader
 
-from ngrams_across_time.clearnets.metrics import gini, hoyer, hoyer_square, abs_entropy, rank
+from ngrams_across_time.clearnets.metrics import gini, hoyer, hoyer_square, abs_entropy
+from ngrams_across_time.clearnets.pgdl.complexity_measures import get_generalization_score
 
 
 def get_batch_metrics(
@@ -167,7 +168,6 @@ def get_mean_sae_acts(
 
             num_batches += 1
 
-    print("Accumulating")
     nodes = {
         k: v / sample_count
         for (k, v), sample_count in zip(
@@ -284,7 +284,11 @@ def stream_sae_acts(
                 for submodule in ordered_submods:
                     accumulated_nodes[submodule.path] = []
 
-    return accumulated_nodes, accumulated_fvu, accumulated_multi_topk_fvu, metrics
+    mean_metrics = {}
+    for key, value in metrics.items():
+        mean_metrics[key] = np.mean(value)
+
+    return accumulated_nodes, accumulated_fvu, accumulated_multi_topk_fvu, mean_metrics
 
 
 def get_sae_metrics(
@@ -298,6 +302,7 @@ def get_sae_metrics(
     device=torch.device("cuda"),
 ):
     metrics: dict[str, Any] = {}
+    activations: dict[str, Any] = {}
 
     metrics["parameter_norm"] = (
         torch.cat([parameters.flatten() for parameters in model.parameters()])
@@ -308,6 +313,8 @@ def get_sae_metrics(
 
     for dataloader_name, dataloader in dataloaders.items():
         dataloader_metrics = {}
+
+        dataloader_metrics['pgdl_score'] = get_generalization_score(model, dataloader)
 
         mean_acts, fvu, multi_topk_fvu = get_mean_sae_acts(
             nnsight_model,
@@ -324,7 +331,7 @@ def get_sae_metrics(
         mean_fvu = np.mean([v for v in fvu.values()])
         mean_multi_topk_fvu = np.mean([v for v in multi_topk_fvu.values()])
 
-        dataloader_metrics: dict[str, Any] = {"nodes": mean_acts}
+        activations[dataloader_name] = mean_acts
 
         dataloader_metrics["sae_fvu"] = mean_fvu
         dataloader_metrics["sae_multi_topk_fvu"] = mean_multi_topk_fvu
@@ -354,4 +361,4 @@ def get_sae_metrics(
 
         metrics[dataloader_name] = dataloader_metrics
 
-    return metrics
+    return metrics, activations

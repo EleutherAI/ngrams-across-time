@@ -77,6 +77,7 @@ class ScheduleFreeLightningWrapper(pl.LightningModule):
     def eval(self) -> None:
         """Set the model to evaluation mode"""
         self.model.eval()
+        optimizer = self.optimizers()
         if not isinstance(optimizer, list):
             optimizer = [optimizer]
         for opt in optimizer:

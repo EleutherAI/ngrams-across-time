@@ -1,7 +1,9 @@
 from argparse import ArgumentParser
 from pathlib import Path
+from collections import defaultdict
 
 import torch    
+from torch import Tensor
 import torchvision as tv
 from torch.utils.data import random_split
 from torchvision.datasets import CIFAR10
@@ -25,8 +27,7 @@ from nnsight import NNsight
 
 from ngrams_across_time.utils.utils import set_seeds
 from ngrams_across_time.clearnets.train.lightning_wrapper import ScheduleFreeLightningWrapper
-from ngrams_across_time.clearnets.inference.inference import get_sae_metrics
-from ngrams_across_time.clearnets.metrics import rank
+from ngrams_across_time.clearnets.metrics import network_compression, singular_values
 
 
 torch.set_float32_matmul_precision('high')
@@ -37,8 +38,8 @@ def vit_hookpoints(model):
     hookpoints = []
     submods = []
     for i, submod in enumerate(model.vit.encoder.layer):
-        hookpoints.append(f"model.vit.encoder.layer.{i}.attention.output")
-        hookpoints.append(f"model.vit.encoder.layer.{i}.output")
+        hookpoints.append(f"vit.encoder.layer.{i}.attention.output")
+        hookpoints.append(f"vit.encoder.layer.{i}.output")
 
         submods.append(submod.attention.output)
         submods.append(submod.output)
@@ -50,8 +51,8 @@ def swin_hookpoints(model):
     submods = []
     for i, stage in enumerate(model.swinv2.encoder.layers):
         for j, submod in enumerate(stage.blocks):
-            hookpoints.append(f"model.swinv2.encoder.layers.{i}.blocks.{j}.attention.output")
-            hookpoints.append(f"model.swinv2.encoder.layers.{i}.blocks.{j}.output")
+            hookpoints.append(f"swinv2.encoder.layers.{i}.blocks.{j}.attention.output")
+            hookpoints.append(f"swinv2.encoder.layers.{i}.blocks.{j}.output")
 
             submods.append(submod.attention.output)
             submods.append(submod.output)
@@ -63,7 +64,7 @@ def convnext_hookpoints(model):
     submods = []
     for i, stage in enumerate(model.convnextv2.encoder.stages):
         for j, submod in enumerate(stage.layers):
-            hookpoints.append(f"model.convnextv2.encoder.stages.{i}.layers.{j}.pwconv2")
+            hookpoints.append(f"convnextv2.encoder.stages.{i}.layers.{j}.pwconv2")
 
             submods.append(submod.pwconv2)
 
@@ -127,15 +128,13 @@ def create_matched_models(image_size=32, num_labels=10):
     )
     vit_model = ViTForImageClassification(vit_config)
 
-    learning_rate = 1e-5
-    betas = (0.95, 0.999)
-    warmup_steps = 10_000
-
     models = {
-        'ConvNeXtV2': ScheduleFreeLightningWrapper(convnext_model, learning_rate, betas, warmup_steps),
-        'Swin': ScheduleFreeLightningWrapper(swin_model, learning_rate, betas, warmup_steps),
-        'ViT': ScheduleFreeLightningWrapper(vit_model, learning_rate, betas, warmup_steps)
+        'ConvNeXtV2': convnext_model,
+        'Swin': swin_model,
+        'ViT': vit_model
     }
+    torch.save(models, Path('data') / 'vision_cifar10' / 'model_initializations.pt')
+
     param_counts = {
         name: sum(p.numel() for p in model.parameters())
         for name, model in models.items()
@@ -158,14 +157,10 @@ def create_matched_models(image_size=32, num_labels=10):
         'feature_dims': {
             'ViT': [2],
             'Swin': [1, 2],
-            'ConvNeXtV2': [1, 2, 3]
+            # Treat dimension 1-2 as an instance dimension to get local spatial information over an image patch, 
+            # and as a feature dimension to get combined features for each individual images
+            'ConvNeXtV2': [3]
         },
-        'instance_dims': {
-            'ViT': [0, 1],
-            'Swin': [0],
-            'ConvNeXtV2': [0]
-        }
-
     }
 
 
@@ -180,6 +175,10 @@ def parse_args():
 
 
 def train_vision(args, metadata, train, val, test):
+    learning_rate = 1e-5
+    betas = (0.95, 0.999)
+    warmup_steps = 10_000
+
     # Convert train to a HF Dataset
     sae_train = HfDataset.from_dict({
         "input_ids": torch.stack([x for x, _ in train]),
@@ -195,13 +194,16 @@ def train_vision(args, metadata, train, val, test):
         num_workers=47,
     )
 
+    
+
     for name, model in metadata['models'].items():
         # seed=38 models trained in 32bit, didn't affect perf
+        lightning_model = ScheduleFreeLightningWrapper(model, learning_rate, betas, warmup_steps)
         wandb_name = f"{name}_s={args.seed}"
         ckpts_path = Path('arch-evals') / wandb_name
         if not ckpts_path.exists() or args.overwrite:
             trainer = pl.Trainer(
-                devices=[1, 3],
+                devices=[0, ],
                 logger=WandbLogger(
                     name=wandb_name, project="arch-evals", entity="eleutherai", reinit=True
                 ) if not args.debug else None,
@@ -210,13 +212,13 @@ def train_vision(args, metadata, train, val, test):
                 deterministic=True,
                 gradient_clip_val=None,
                 callbacks=[
-                    ModelCheckpoint(dirpath=ckpts_path, save_last=True, every_n_epochs=5, save_top_k=-1), 
+                    ModelCheckpoint(dirpath=ckpts_path, save_last=True, every_n_epochs=1, save_top_k=-1), 
                     EarlyStopping(monitor='val_loss', patience=30)
                 ],
             )
 
-            trainer.fit(model, dm)
-            trainer.test(model, dm)
+            trainer.fit(lightning_model, dm)
+            trainer.test(lightning_model, dm)
 
             try:
                 wandb.finish()
@@ -230,10 +232,9 @@ def train_vision(args, metadata, train, val, test):
                 SaeConfig(multi_topk=True, num_latents=4096),
                 batch_size=8,
                 run_name=str(Path('sae') / wandb_name),
-                log_to_wandb=True,
+                log_to_wandb=not args.debug,
                 hookpoints=metadata['hookpoints'][name],
                 feature_dims=metadata['feature_dims'][name],
-                instance_dims=metadata['instance_dims'][name],
                 grad_acc_steps=2,
                 micro_acc_steps=2,
             )
@@ -245,6 +246,7 @@ def train_vision(args, metadata, train, val, test):
             trainer.fit()
 
 
+@torch.no_grad()
 def inference_vision(args, metadata: dict, train, test):
     device = torch.device("cuda")
     # Fucking with data formats because I'm lazy
@@ -274,10 +276,14 @@ def inference_vision(args, metadata: dict, train, test):
     })
     test.set_format(type="torch", columns=["input_ids", "label"])
 
-    train_dl = torch.utils.data.DataLoader(train, batch_size=128)
-    test_dl = torch.utils.data.DataLoader(test, batch_size=128)
+    train_dl = torch.utils.data.DataLoader(train, batch_size=128) # type: ignore
+    test_dl = torch.utils.data.DataLoader(test, batch_size=128) # type: ignore
     
     inference_data = {}
+    # if (Path('data') / 'vision_cifar10' / 'activation_data.pt').exists():
+    activation_data = torch.load(Path('data') / 'vision_cifar10' / 'activation_data.pt')
+    model_initialization_data = torch.load(Path('data') / 'vision_cifar10' / 'model_initializations.pt')
+
     for name, model_cls in metadata['models'].items():
         ckpts_path = Path('arch-evals') / f"{name}_s={args.seed}"
 
@@ -313,36 +319,26 @@ def inference_vision(args, metadata: dict, train, test):
         print(f"{name} train loss: {train_loss:.4f}")
         print(f"{name} test loss: {test_loss:.4f}")
 
-    
-        if name == "ViT":
-            instance_dims = (0, 1,)
-            feature_dims = (2,)
-        elif name == "Swin":
-        # TODO think about whether to treat dimension 1 as an instance - it should probably be a latent dimensions since they come from the same image?
-        # elif name == "Swin":
-            instance_dims = (0,)
-            feature_dims = (1, 2,)
-        elif name == "ConvNeXtV2":
-            instance_dims = (0,)
-            feature_dims = (1, 2, 3,)
 
         nnsight_model.cuda()
         dataloaders = {
             'train': train_dl,
             'test': test_dl
         }
-        metrics = get_sae_metrics(
-            model, 
-            nnsight_model, 
-            dictionaries,   
-            submods, 
-            dataloaders,
-            feature_dims=feature_dims,
-            instance_dims=instance_dims,
-            device=device
-        )
+        metrics, activations = {}, {}
+        # metrics, activations = get_sae_metrics(
+        #     model.model, 
+        #     nnsight_model,
+        #     dictionaries,
+        #     submods,
+        #     dataloaders,
+        #     feature_dims=feature_dims,
+        #     device=device
+        # )
 
-        breakpoint()    
+        metrics['num_sae_features'] = sum(d.num_latents for d in dictionaries.values())
+        metrics['sae_k'] = sum(d.cfg.k for d in dictionaries.values())
+
         # In vision models these often look like [feature map batch, feature map channel, feature map height, feature map width]
         # And don't match the input size (feature map batch is the number of convolutions when you slide over the image * original batch and it
         # changes over the layers)
@@ -350,24 +346,73 @@ def inference_vision(args, metadata: dict, train, test):
 
         # To get their rank we need to flatten some and batch other dimensions. In this case we flatten the feature map channel
         # and batch the feature map height and width
+
+        def get_layer_metrics(parameters: Tensor, parameters_initial: Tensor, prefix: str):
+            return {
+                f"{prefix}_layer_ranks": network_compression(parameters, parameters_initial),
+                f"{prefix}_max_rank": min(parameters.size()),
+                f"{prefix}_diff_singular_values": singular_values(parameters - parameters_initial),
+                f"{prefix}_singular_values": singular_values(parameters),
+                f"{prefix}_layer_norms": torch.linalg.matrix_norm(parameters).item()
+            }
+
+        layer_metrics = defaultdict(list)
         if name == 'ConvNeXtV2':
-            #  Uh oh
             # Parameters with shape [m, 1, n n] are channels and kernels and the kernels need to be flattened
             # Parameters with two dims are left as is
             # Bias terms with one dim are discarded
             # Parameters with shape [m, n, o, o] are like the first option but with spatial downsampling. o and o can clearly be flattened buttt
-            # 
-            
+            for i, stage in enumerate(model.model.convnextv2.encoder.stages):
+                for j, submod in enumerate(stage.layers):
+                    parameters_initial = model_initialization_data[
+                        name
+                    ].model.convnextv2.encoder.stages[i].layers[j].pwconv2.weight.to(device)
+                    parameters_final = submod.pwconv2.weight
+                    layer_metrics.update(
+                        get_layer_metrics(parameters_final, parameters_initial, 'conv')
+                    )
+        elif name == 'Swin':
+            for i, stage in enumerate(model.model.swinv2.encoder.layers):
+                for j, submod in enumerate(stage.blocks):
+                    parameters_initial = model_initialization_data[name].model.swinv2.encoder.layers[i].blocks[j].attention.output.dense.weight.to(device)
+                    parameters_final = submod.attention.output.dense.weight
+                    layer_metrics.update(
+                        get_layer_metrics(parameters_final, parameters_initial, 'attn')
+                    )
 
-        metrics["parameter_ranks"] = [rank(parameters.squeeze()) for parameters in model.parameters() if parameters.squeeze().ndim > 1]
+                    parameters_initial = model_initialization_data[name].model.swinv2.encoder.layers[i].blocks[j].output.dense.weight.to(device)
+                    parameters_final = submod.output.dense.weight
+                    layer_metrics.update(
+                        get_layer_metrics(parameters_final, parameters_initial, 'mlp')
+                    )
+
+        elif name == 'ViT':
+            for i, submod in enumerate(model.model.vit.encoder.layer):
+                parameters_initial = model_initialization_data[name].model.vit.encoder.layer[i].attention.output.dense.weight.to(device)
+                parameters_final = submod.attention.output.dense.weight
+                layer_metrics.update(
+                    get_layer_metrics(parameters_final, parameters_initial, 'attn')
+                )
+
+                parameters_initial = model_initialization_data[name].model.vit.encoder.layer[i].output.dense.weight.to(device)
+                parameters_final = submod.output.dense.weight
+                layer_metrics.update(
+                    get_layer_metrics(parameters_final, parameters_initial, 'mlp')
+                )
+        else:
+            raise ValueError(f"Unknown model name: {name}")
+
+        metrics.update(layer_metrics)
 
         inference_data[name] = {
             'train_loss': train_loss,
             'test_loss': test_loss,
             **metrics
         }
+        activation_data[name] = activations
     
-    torch.save(inference_data, Path('data') / 'inference_data.pt')
+    torch.save(inference_data, Path('data') / 'vision_cifar10' / 'inference_data.pt')
+    torch.save(activation_data, Path('data') / 'vision_cifar10' / 'activation_data.pt')
 
 
 def main():

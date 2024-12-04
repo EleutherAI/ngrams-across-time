@@ -248,7 +248,6 @@ class SparseGPTNeoModel(GPTNeoPreTrainedModel):
                 use_cache = False
 
         if inputs_embeds is None:
-            breakpoint()
             inputs_embeds = self.wte(input_ids)
 
         # kept for BC (non `Cache` `past_key_values` inputs)

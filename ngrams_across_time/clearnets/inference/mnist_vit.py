@@ -189,14 +189,15 @@ def inference(model_path: Path, out_path: Path, sae_path: Path):
 
         checkpoint_data[epoch]['train_loss'] = compute_losses(model, train_dl, device)
         checkpoint_data[epoch]['test_loss'] = compute_losses(model, test_dl, device)
-        checkpoint_data[epoch].update(get_sae_metrics(
+        metrics, activations = get_sae_metrics(
             model, 
             nnsight_model,
             dictionaries,
             all_submods,
-            dataloaders
-        ))
-
+            dataloaders,
+        )
+        checkpoint_data[epoch].update(metrics)
+        
         torch.save(checkpoint_data, out_path)
 
     torch.save(checkpoint_data, out_path)

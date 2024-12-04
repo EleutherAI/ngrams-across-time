@@ -242,7 +242,6 @@ def main():
     val_dataset = val_dataset.map(tokenize, batched=True, cache_file_name="data/tinystories/val_dataset_v2.cache")
     val_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
 
-
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=16)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
     

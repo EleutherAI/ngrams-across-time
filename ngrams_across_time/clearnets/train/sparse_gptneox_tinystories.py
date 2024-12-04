@@ -1,5 +1,3 @@
-from collections import Counter
-import json
 import os
 from argparse import ArgumentParser
 import torch
@@ -7,25 +5,24 @@ from transformers import PreTrainedTokenizerFast
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 import pytorch_lightning as pl
-import numpy as np
-from typing import Optional, Tuple
-from tokenizers import Tokenizer, models
+from typing import Optional
+from tokenizers import models
+import torchmetrics as tm
 
 
-from pathlib import Path
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
 from datasets import Dataset as HFDataset
 from transformers import AutoTokenizer
 import lovely_tensors as lt
 
-lt.monkey_patch()
-
 from ngrams_across_time.clearnets.train.sparse_gptneox import SparseGPTNeoConfig, SparseGPTNeoForCausalLM
+from ngrams_across_time.utils.utils import set_seeds
 
+lt.monkey_patch()
 torch.set_float32_matmul_precision('high')
+set_seeds(42)
 
 def restrict_tokenizer_vocab(base_tokenizer, dataset, max_vocab_size: int = 10_000, save_path: Optional[str] = None):
     """
@@ -138,7 +135,7 @@ tiny_stories_33m_config = {
   "initializer_range": 0.02,
   "intermediate_size": None,
   "layer_norm_epsilon": 1e-05,
-  "max_position_embeddings": 512, # 2048,
+  "max_position_embeddings": 2048,
   "model_type": "gpt_neo",
   "num_heads": 16,
   "num_layers": 4,
@@ -156,7 +153,7 @@ tiny_stories_33m_config = {
 
 
 class TinyStoriesModel(pl.LightningModule):
-    def __init__(self, dense: bool):
+    def __init__(self, dense: bool, tokenizer):
         super().__init__()
         # From https://huggingface.co/roneneldan/TinyStories-33M
         # lr_scheduler = "constant"
@@ -164,20 +161,43 @@ class TinyStoriesModel(pl.LightningModule):
         self.weight_decay = 0.1
         self.adam_beta1 = 0.9
         self.adam_beta2 = 0.95
+        self.tokenizer = tokenizer
 
         self.config = SparseGPTNeoConfig(**tiny_stories_33m_config, sparse_mlp=not dense) # max_position_embeddings=context_length
         self.model = SparseGPTNeoForCausalLM(self.config) 
+
+        self.train_acc = tm.Accuracy("multiclass", num_classes=tiny_stories_33m_config["vocab_size"])
+        self.val_acc = tm.Accuracy("multiclass", num_classes=tiny_stories_33m_config["vocab_size"])
+
 
     def forward(self, input_ids, attention_mask):
         return self.model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
 
     def training_step(self, batch, batch_idx):
         outputs = self.forward(**batch)
+        self.log("train_loss", outputs.loss, on_step=True, prog_bar=True, sync_dist=True, batch_size=batch["input_ids"].shape[0], logger=True)
+        
+        self.log("train_perplexity", torch.exp(outputs.loss), on_epoch=True, on_step=False, prog_bar=True, sync_dist=True, batch_size=batch["input_ids"].shape[0], logger=True)
+        self.train_acc(batch["input_ids"], batch["attention_mask"])
+        self.log(
+            "train_acc", self.train_acc, on_epoch=True, on_step=False, logger=True, sync_dist=True, batch_size=batch["input_ids"].shape[0]
+        )
+
         return outputs.loss
 
     def validation_step(self, batch, batch_idx):
         outputs = self.forward(**batch)
-        self.log("val_loss", outputs.loss, prog_bar=True)
+        self.log("val_loss", outputs.loss, prog_bar=True, sync_dist=True, batch_size=batch["input_ids"].shape[0], logger=True)
+        self.log("val_acc", self.val_acc, prog_bar=True, sync_dist=True, batch_size=batch["input_ids"].shape[0], logger=True)
+        self.log("val_perplexity", torch.exp(outputs.loss), prog_bar=True, sync_dist=True, batch_size=batch["input_ids"].shape[0], logger=True)
+
+    def on_validation_epoch_end(self):
+        if self.global_rank == 0:
+            device = next(self.parameters()).device
+            sample_input = torch.tensor([[self.tokenizer.bos_token_id]], device=device)
+            sample_output = self.model.generate(sample_input, max_new_tokens=99)
+            sample_str = self.tokenizer.decode(sample_output[0], skip_special_tokens=True)
+            print(f"\nEpoch {self.current_epoch} sample:", sample_str)
 
     def configure_optimizers(self):
         self.optimizer = AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay, betas=(self.adam_beta1, self.adam_beta2))
@@ -195,9 +215,12 @@ def parse_args():
 def main():
     args = parse_args()
     # From https://huggingface.co/roneneldan/TinyStories-33M
-    sae_batch_size_scale_down = 1
-    batch_size = 80 // sae_batch_size_scale_down
-    gradient_accumulation_steps = 16 * sae_batch_size_scale_down
+    batch_size = 80
+    gradient_accumulation_steps = 16
+
+    # Load dataset from ronan's HF
+    train_dataset = load_dataset("roneneldan/TinyStories")["train"]
+    val_dataset = load_dataset("roneneldan/TinyStories")["validation"]
 
     if not os.path.exists("data/tinystories/restricted_tokenizer_v2"):
         tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neo-2.7B")
@@ -211,12 +234,8 @@ def main():
     else:
         tokenizer = AutoTokenizer.from_pretrained("data/tinystories/restricted_tokenizer_v2")
 
-    # Load dataset from ronan's HF
-    train_dataset = load_dataset("roneneldan/TinyStories")["train"]
-    val_dataset = load_dataset("roneneldan/TinyStories")["validation"]
-
     tiny_stories_33m_config["vocab_size"] = tokenizer.vocab_size
-    model = TinyStoriesModel(args.dense)
+    model = TinyStoriesModel(args.dense, tokenizer)
     model.cuda()
 
     def tokenize(examples):
@@ -245,14 +264,14 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=16)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
     
-    checkpoint_callback = ModelCheckpoint(dirpath="data/tinystories/checkpoints", save_top_k=1, monitor="val_loss", mode="min")
+    checkpoint_callback = ModelCheckpoint(dirpath="data/tinystories/checkpoints", save_top_k=1, monitor="val_loss", mode="min", every_n_epochs=1)
     wandb_logger = WandbLogger(project="tinystories", log_model=True)
 
     trainer = pl.Trainer(
         accelerator="auto",
         # devices="auto",
         max_epochs=30,
-        devices=[3, 4, 5, 6] if not args.debug else [3],
+        devices=[0, 1, 2, 3, 4, 5, 6, 7] if not args.debug else [3],
         callbacks=[checkpoint_callback],
         logger=wandb_logger if not args.debug else None,
         gradient_clip_val=1.0,
@@ -263,9 +282,5 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        import pdb
-        pdb.post_mortem()
+    main()
 

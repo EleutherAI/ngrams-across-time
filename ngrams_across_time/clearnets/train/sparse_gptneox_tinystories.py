@@ -8,11 +8,11 @@ import pytorch_lightning as pl
 from typing import Optional
 from tokenizers import models
 import torchmetrics as tm
+from pathlib import Path
 
-
+from schedulefree import AdamWScheduleFree
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
-from torch.optim import AdamW
 from datasets import Dataset as HFDataset
 from transformers import AutoTokenizer
 import lovely_tensors as lt
@@ -22,7 +22,8 @@ from ngrams_across_time.utils.utils import set_seeds
 
 lt.monkey_patch()
 torch.set_float32_matmul_precision('high')
-set_seeds(42)
+SEED = 42
+set_seeds(SEED)
 
 def restrict_tokenizer_vocab(base_tokenizer, dataset, max_vocab_size: int = 10_000, save_path: Optional[str] = None):
     """
@@ -253,7 +254,7 @@ class TinyStoriesModel(pl.LightningModule):
             print(f"\nEpoch {self.current_epoch} sample:", sample_str)
 
     def configure_optimizers(self):
-        self.optimizer = AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay, betas=(self.adam_beta1, self.adam_beta2))
+        self.optimizer = AdamWScheduleFree(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay, betas=(self.adam_beta1, self.adam_beta2))
         return {
             "optimizer": self.optimizer,
         }
@@ -262,11 +263,14 @@ def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--dense", action="store_true")
+    parser.add_argument("--tag", type=str, default='')
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    max_epochs = 200
+    early_stopping_patience = 15
     size = "8"
 
     if args.dense:
@@ -323,15 +327,20 @@ def main():
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=16)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
-    
-    checkpoint_callback = ModelCheckpoint(dirpath=f"data/tinystories-{size}/checkpoints", save_top_k=-1, monitor="val_loss", mode="min", every_n_epochs=1, save_last=True)
-    wandb_logger = WandbLogger(project="tinystories", log_model=True)
+
+    name = f"{args.tag + ' ' if args.tag else ''}{'dense' if args.dense else 'sparse'} {size}m max e={max_epochs} esp={early_stopping_patience} s={SEED}"
+    wandb_logger = WandbLogger(project="tinystories", log_model=True, name=name)
+
+    dir_path = Path('data/tinystories') / name.replace(" ", "-") / 'checkpoints'
+    checkpoint_callback = ModelCheckpoint(dirpath=dir_path, save_top_k=-1, monitor="val_loss", mode="min", every_n_epochs=1, save_last=True)
 
     trainer = pl.Trainer(
+        deterministic=True,
+        precision="bf16",
         accelerator="auto",
-        max_epochs=10,
-        devices=[3, 4, 5, 6] if not args.debug else [3],
-        callbacks=[checkpoint_callback],
+        max_epochs=max_epochs,
+        devices=[0, 1, 2, 3, 4, 5, 6, 7] if not args.debug else [3],
+        callbacks=[checkpoint_callback, EarlyStopping(monitor="val_loss", mode="min", patience=early_stopping_patience)],
         logger=wandb_logger if not args.debug else None,
         gradient_clip_val=1.0,
         accumulate_grad_batches=gradient_accumulation_steps,  # Effective batch size = 80 * 16 = 1280

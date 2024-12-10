@@ -1,5 +1,6 @@
-# python -m ngrams_across_time.clearnets.train.autointerp_cache --dataset_repo "roneneldan/TinyStories" --dataset_split "train[:1%]" --dataset_row "text" --n_tokens 10_000_000
+# python -m ngrams_across_time.clearnets.autointerp_cache --dataset_repo "roneneldan/TinyStories" --dataset_split "train[:1%]" --dataset_row "text" --n_tokens 1_000_000
 
+# python -m ngrams_across_time.clearnets.autointerp_explain --model "sparse-8m-max-e=200-esp=15-s=42" --module "roneneldan/TinyStories/sparse-feedfwd-transformer/.transformer.h.6.mlp"
 # --train_type "quantiles" --n_examples_train 40 --n_quantiles 10 --width 24576 
 import os
 
@@ -7,7 +8,6 @@ from nnsight import NNsight
 from simple_parsing import ArgumentParser
 import torch
 from transformers import AutoTokenizer
-from sae_auto_interp.autoencoders import load_eai_autoencoders
 from sae_auto_interp.config import CacheConfig
 from sae_auto_interp.autoencoders.wrapper import AutoencoderLatents
 from sae_auto_interp.features import FeatureCache
@@ -16,6 +16,7 @@ from sae.sae import Sae
 from sae.config import SaeConfig
 from typing import Any, Tuple, Dict
 from ngrams_across_time.clearnets.train.sparse_gptneox_tinystories import TinyStoriesModel
+
 
 def load_sparse_mlp_transformer_latents(
     model: Any,
@@ -112,23 +113,18 @@ def get_gptneo_hookpoints(model):
 
 
 def main(cfg: CacheConfig, args): 
-    size = '8'
     tokenizer = AutoTokenizer.from_pretrained("data/tinystories/restricted_tokenizer_v2")
-    cpts_path = f'data/tinystories-{size}/checkpoints-5-dec/last.ckpt'
-    
-    # config = SparseGPTNeoConfig.from_pretrained(cpts_path)
-    # model = SparseGPTNeoForCausalLM(config)
+    ckpt_path = 'sparse-8m-max-e=200-esp=15-s=42/checkpoints/last.ckpt'
     ptl_model = TinyStoriesModel.load_from_checkpoint(
-        cpts_path,
+        ckpt_path,
         dense=False,
         tokenizer=tokenizer
     )
     ptl_model.to(device='cuda')
 
     model = ptl_model.model
-    shapes = resolve_widths(model, get_gptneo_hookpoints(model), torch.randint(0, 10000, (1, 1024)))
+    # shapes = resolve_widths(model, get_gptneo_hookpoints(model), torch.randint(0, 10000, (1, 1024)))
 
-    
     model = NNsight(model, device_map="auto", torch_dtype=torch.bfloat16, tokenizer=tokenizer)
     model.tokenizer = tokenizer
 
@@ -152,22 +148,22 @@ def main(cfg: CacheConfig, args):
         submodule_dict, 
         batch_size=cfg.batch_size,
     )
-    name = f"No-SAE"
+
+    name = "sparse-feedfwd-transformer"
 
     cache.run(cfg.n_tokens, tokens)
-    breakpoint()
     
-    print(f"Saving splits to {f'raw_features/{args.dataset_repo}/{name}'}")
-    os.makedirs(f"raw_features/{args.dataset_repo}/{name}", exist_ok=True)
+    print(f"Saving splits to {f'raw_features/{cfg.dataset_repo}/{name}'}")
+    os.makedirs(f"raw_features/{cfg.dataset_repo}/{name}", exist_ok=True)
     cache.save_splits(
         n_splits=cfg.n_splits, 
-        save_dir=f"raw_features/{args.dataset_repo}/{name}"
+        save_dir=f"raw_features/{cfg.dataset_repo}/{name}"
     )
-    print(f"Saving config to {f'raw_features/{args.dataset_repo}/{name}'}")
+    print(f"Saving config to {f'raw_features/{cfg.dataset_repo}/{name}'}")
     cache.save_config(
-        save_dir=f"raw_features/{args.dataset_repo}/{name}",
+        save_dir=f"raw_features/{cfg.dataset_repo}/{name}",
         cfg=cfg,
-        model_name="TinyStories-8M-Sparse"
+        model_name="sparse-8m-max-e=200-esp=15-s=42"
     )
 
 if __name__ == "__main__":
@@ -177,5 +173,6 @@ if __name__ == "__main__":
     parser.add_arguments(CacheConfig, dest="options")
     args = parser.parse_args()
     cfg = args.options
+    cfg.tokenizer_or_model_name = "data/tinystories/restricted_tokenizer_v2"
     
     main(cfg, args)

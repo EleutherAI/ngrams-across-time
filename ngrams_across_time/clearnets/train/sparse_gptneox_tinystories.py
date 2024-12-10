@@ -151,10 +151,10 @@ tiny_stories_8m_config = {
   "summary_proj_to_labels": True,
   "summary_type": "cls_index",
   "summary_use_proj": True,
-  "torch_dtype": "float32",
+  "torch_dtype": "bfloat16", # "float32",
   "transformers_version": "4.28.1",
   "use_cache": True,
-  "vocab_size": 50257,
+  "vocab_size": 10_000, # 50257,
   "window_size": 256
 }
 
@@ -259,6 +259,67 @@ class TinyStoriesModel(pl.LightningModule):
             "optimizer": self.optimizer,
         }
 
+    def train(self, mode: bool = True) -> None:
+        """Set the model to training mode"""
+        self.model.train(mode)
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.train(mode)
+
+    def eval(self) -> None:
+        """Set the model to evaluation mode"""
+        self.model.eval()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.eval()
+
+    def on_validation_model_eval(self) -> None:
+        self.model.eval()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.eval()
+
+    def on_validation_model_train(self) -> None:
+        self.model.train()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.train()
+
+    def on_test_model_eval(self) -> None:
+        self.model.eval()
+        optimizer = self.optimizers()
+        
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.eval()
+
+    def on_test_model_train(self) -> None:
+        self.model.train()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.train()
+
+
+    def on_predict_model_eval(self) -> None:  # redundant with on_predict_start()
+        self.model.eval()
+        optimizer = self.optimizers()
+        if not isinstance(optimizer, list):
+            optimizer = [optimizer]
+        for opt in optimizer:
+            opt.eval()
+    
+
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--debug", action="store_true")
@@ -276,11 +337,11 @@ def main():
     if args.dense:
         sparse_batch_size_scalar = 1
     else:
-        sparse_batch_size_scalar = 1
+        sparse_batch_size_scalar = 2
     
     # From https://huggingface.co/roneneldan/TinyStories-33M
-    batch_size = 80 * sparse_batch_size_scalar
-    gradient_accumulation_steps = 16 // sparse_batch_size_scalar
+    batch_size = 80 // sparse_batch_size_scalar
+    gradient_accumulation_steps = 16 * sparse_batch_size_scalar
 
     # Load dataset from ronan's HF
     train_dataset = load_dataset("roneneldan/TinyStories")["train"]
@@ -339,7 +400,7 @@ def main():
         precision="bf16",
         accelerator="auto",
         max_epochs=max_epochs,
-        devices=[0, 1, 2, 3, 4, 5, 6, 7] if not args.debug else [3],
+        devices=[1, 2, 3, 4, 5, 6, 7] if not args.debug else [0],
         callbacks=[checkpoint_callback, EarlyStopping(monitor="val_loss", mode="min", patience=early_stopping_patience)],
         logger=wandb_logger if not args.debug else None,
         gradient_clip_val=1.0,

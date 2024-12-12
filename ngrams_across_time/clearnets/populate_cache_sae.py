@@ -3,12 +3,14 @@
 from nnsight import NNsight
 from simple_parsing import ArgumentParser
 import torch
-from sae_auto_interp.autoencoders import load_eai_autoencoders
+# from sae_auto_interp.autoencoders import load_eai_autoencoders
 from sae_auto_interp.config import CacheConfig
 from sae_auto_interp.features import FeatureCache
 from sae_auto_interp.utils import load_tokenized_data
 from transformers import AutoTokenizer
 from ngrams_across_time.clearnets.sparse_mlp.sparse_gptneox_tinystories import TinyStoriesModel
+from ngrams_across_time.clearnets.sparse_mlp.load_saes import load_eai_autoencoders
+
 import os
 
 def main(

@@ -51,7 +51,7 @@ from transformers.utils import (
     
 )
 # from transformers.models.gpt_neo.configuration_gpt_neo import GPTNeoConfig
-from ngrams_across_time.clearnets.train.sparse_gptneox_config import SparseGPTNeoConfig
+from ngrams_across_time.clearnets.sparse_mlp.sparse_gptneox_config import SparseGPTNeoConfig
 from transformers.models.gpt_neo.modeling_gpt_neo import (
     GPTNeoSelfAttention, 
     GPTNeoFlashAttention2, 
@@ -79,12 +79,16 @@ class SparseMLP(nn.Module):
         self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(float(config.resid_dropout))
 
-    def forward(self, hidden_states):
-        shape = hidden_states.shape
+    def pre_acts(self, hidden_states):
         hidden_states = self.c_fc(hidden_states)
         hidden_states = self.act(hidden_states)
 
-        top_acts, top_indices = hidden_states.topk(self.k, sorted=False)
+        return hidden_states.topk(self.k, sorted=False)
+
+    def forward(self, hidden_states):
+        shape = hidden_states.shape
+    
+        top_acts, top_indices = self.pre_acts(hidden_states)
         y = decoder_impl(
             top_indices.view(-1, self.k).contiguous(), 
             top_acts.view(-1, self.k).contiguous(), 
@@ -92,7 +96,11 @@ class SparseMLP(nn.Module):
         
         hidden_states = y + self.c_proj.bias
         hidden_states = self.dropout(hidden_states)
-        return hidden_states
+        return {
+            'hidden_states': hidden_states,
+            'top_indices': top_indices,
+            'top_acts': top_acts
+        }
 
 
 class SparseGPTNeoBlock(nn.Module):
@@ -106,7 +114,7 @@ class SparseGPTNeoBlock(nn.Module):
         if config.sparse_mlp:
             self.mlp = SparseMLP(inner_dim, config)
         else:
-            self.mlp = GPTNeoMLP(hidden_size, config)
+            self.mlp = GPTNeoMLP(hidden_size, config) #TODO LQ inner_dim was hidden_size in previous iteration
 
     def forward(
         self,
@@ -137,6 +145,8 @@ class SparseGPTNeoBlock(nn.Module):
         residual = hidden_states
         hidden_states = self.ln_2(hidden_states)
         feed_forward_hidden_states = self.mlp(hidden_states)
+        if isinstance(feed_forward_hidden_states, dict):
+            feed_forward_hidden_states = feed_forward_hidden_states['hidden_states']
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
 
@@ -148,7 +158,7 @@ class SparseGPTNeoBlock(nn.Module):
         return outputs  # hidden_states, past_kv, attentions
 
 
-class GPTNeoPreTrainedModel(PreTrainedModel):
+class SparseGPTNeoPreTrainedModel(PreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
@@ -188,7 +198,7 @@ class GPTNeoPreTrainedModel(PreTrainedModel):
     "The bare GPT Neo Model transformer outputting raw hidden-states without any specific head on top.",
     GPT_NEO_START_DOCSTRING,
 )
-class SparseGPTNeoModel(GPTNeoPreTrainedModel):
+class SparseGPTNeoModel(SparseGPTNeoPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
@@ -482,7 +492,7 @@ class SparseGPTNeoModel(GPTNeoPreTrainedModel):
     """,
     GPT_NEO_START_DOCSTRING,
 )
-class SparseGPTNeoForCausalLM(GPTNeoPreTrainedModel, GenerationMixin):
+class SparseGPTNeoForCausalLM(SparseGPTNeoPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):

@@ -1,7 +1,9 @@
 # python -m ngrams_across_time.clearnets.autointerp_cache --dataset_repo "roneneldan/TinyStories" --dataset_split "train[:1%]" --dataset_row "text" --n_tokens 1_000_000
 
-# python -m ngrams_across_time.clearnets.autointerp_explain --model "sparse-8m-max-e=200-esp=15-s=42" --module "roneneldan/TinyStories/sparse-feedfwd-transformer/.transformer.h.6.mlp"
-# --train_type "quantiles" --n_examples_train 40 --n_quantiles 10 --width 24576 
+# python -m ngrams_across_time.clearnets.autointerp_explain --model "data/tinystories/sparse-8m-max-e=200-esp=15-s=42" --modules "roneneldan/TinyStories/sparse-feedfwd-transformer/.transformer.h.0.mlp" "roneneldan/TinyStories/sparse-feedfwd-transformer/.transformer.h.1.mlp" "roneneldan/TinyStories/sparse-feedfwd-transformer/.transformer.h.2.mlp" "roneneldan/TinyStories/sparse-feedfwd-transformer/.transformer.h.3.mlp" "roneneldan/TinyStories/sparse-feedfwd-transformer/.transformer.h.4.mlp" "roneneldan/TinyStories/sparse-feedfwd-transformer/.transformer.h.5.mlp" "roneneldan/TinyStories/sparse-feedfwd-transformer/.transformer.h.7.mlp" --n_random 50 --n_examples_test 50 --train_type "quantiles" --n_examples_train 40 --n_quantiles 10 --width 8192
+
+
+# python -m ngrams_across_time.clearnets.autointerp_explain --model "data/tinystories/dense-8m-max-e=200-esp=15-s=42" --modules "roneneldan/TinyStories/SAE/.transformer.h.0.mlp" "roneneldan/TinyStories/SAE/.transformer.h.1.mlp" "roneneldan/TinyStories/SAE/.transformer.h.2.mlp" "roneneldan/TinyStories/SAE/.transformer.h.3.mlp" "roneneldan/TinyStories/SAE/.transformer.h.4.mlp" "roneneldan/TinyStories/SAE/.transformer.h.5.mlp" "roneneldan/TinyStories/SAE/.transformer.h.6.mlp" "roneneldan/TinyStories/SAE/.transformer.h.7.mlp" --n_random 50 --n_examples_test 50 --train_type "quantiles" --n_examples_train 40 --n_quantiles 10 --width 8192
 import os
 
 from nnsight import NNsight
@@ -15,8 +17,13 @@ from sae_auto_interp.utils import load_tokenized_data
 from sae.sae import Sae
 from sae.config import SaeConfig
 from typing import Any, Tuple, Dict
-from ngrams_across_time.clearnets.train.sparse_gptneox_tinystories import TinyStoriesModel
 
+from ngrams_across_time.clearnets.sparse_mlp.sparse_gptneox_tinystories import TinyStoriesModel
+from ngrams_across_time.clearnets.inference.inference import to_dense
+
+
+def load_dense_mlp_transformer_saes(model):
+    pass
 
 def load_sparse_mlp_transformer_latents(
     model: Any,
@@ -34,25 +41,20 @@ def load_sparse_mlp_transformer_latents(
     Returns:
         Tuple[Dict[str, Any], Any]: A tuple containing the submodules dictionary and the edited model.
     """
+    # This doesn't matter because we don't use the width
     hook_to_d_in = resolve_widths(model, get_gptneo_hookpoints(model), torch.randint(0, 10000, (1, 1024)))
 
     submodules = {}
 
     for layer in range(len(model.transformer.h)):
         def _forward(x):
-            return x
+            return to_dense(x['top_acts'], x['top_indices'], num_latents=256 * 4 * 8) # hook_to_d_in[hookpoint])
+            # return (x['top_indices'], x['top_acts'])
 
         hookpoint = f"transformer.h.{layer}.mlp"
         submodule = model.transformer.h[layer].mlp
         submodule.ae = AutoencoderLatents(
-            None, _forward, width=hook_to_d_in[hookpoint] # type: ignore
-        )
-        submodules[submodule.path] = submodule
-
-        hookpoint = f"transformer.h.{layer}.attn.attention"
-        submodule = model.transformer.h[layer].attn
-        submodule.ae = AutoencoderLatents(
-            None, _forward, width=hook_to_d_in[hookpoint] # type: ignore
+            None, _forward, width=256 * 4 * 8 # hook_to_d_in[hookpoint] # type: ignore
         )
         submodules[submodule.path] = submodule
 
@@ -69,8 +71,7 @@ def load_sparse_mlp_transformer_latents(
 
 @torch.inference_mode()
 def resolve_widths(
-    model, module_names: list[str], inputs: torch.Tensor, 
-    dims: list[int] = [-1],
+    model, module_names: list[str], inputs: torch.Tensor, dim = -1
 ) -> dict[str, int]:
     """Find number of output dimensions for the specified modules."""
     module_to_name = {
@@ -83,21 +84,19 @@ def resolve_widths(
         if isinstance(output, tuple):
             output, *_ = output
 
+        if isinstance(output, dict):
+            output = output['hidden_states']
+
         name = module_to_name[module]
 
-        pos_dims = [d if d >= 0 else output.ndim + d for d in dims]
-        assert all(i in pos_dims for i in range(min(pos_dims), max(pos_dims) + 1)) and max(pos_dims) == output.ndim - 1, \
-            f"Feature dimensions {dims} must be contiguous and include the final dimension"
-
-        from math import prod
-        shapes[name] = prod(output.shape[d] for d in dims)
+        shapes[name] = output.shape[dim]
 
     handles = [
         mod.register_forward_hook(hook) for mod in module_to_name
     ]
     dummy = inputs.to(model.device)
     try:
-        model(dummy)
+        model._model(dummy)
     finally:
         for handle in handles:
             handle.remove()
@@ -114,25 +113,19 @@ def get_gptneo_hookpoints(model):
 
 def main(cfg: CacheConfig, args): 
     tokenizer = AutoTokenizer.from_pretrained("data/tinystories/restricted_tokenizer_v2")
-    ckpt_path = 'sparse-8m-max-e=200-esp=15-s=42/checkpoints/last.ckpt'
+    ckpt_path = 'data/tinystories/sparse-8m-max-e=200-esp=15-s=42/checkpoints/last.ckpt'
     ptl_model = TinyStoriesModel.load_from_checkpoint(
         ckpt_path,
         dense=False,
         tokenizer=tokenizer
     )
-    ptl_model.to(device='cuda')
-
     model = ptl_model.model
-    # shapes = resolve_widths(model, get_gptneo_hookpoints(model), torch.randint(0, 10000, (1, 1024)))
-
-    model = NNsight(model, device_map="auto", torch_dtype=torch.bfloat16, tokenizer=tokenizer)
-    model.tokenizer = tokenizer
-
-    
+    model.to(device='cuda')
     # I believe dispatch won't work for tinystories models
-    # model = NNsight(model, device_map="auto", dispatch=True,torch_dtype=torch.bfloat16)
+    model = NNsight(ptl_model.model, device_map="auto", torch_dtype=torch.bfloat16, tokenizer=tokenizer) # dispatch=False
+    model.tokenizer = tokenizer
      
-    submodule_dict,model = load_sparse_mlp_transformer_latents(model)
+    submodule_dict, model = load_sparse_mlp_transformer_latents(model)
 
     tokens = load_tokenized_data(
         cfg.ctx_len,
@@ -169,7 +162,6 @@ def main(cfg: CacheConfig, args):
 if __name__ == "__main__":
 
     parser = ArgumentParser()
-    #ctx len 256
     parser.add_arguments(CacheConfig, dest="options")
     args = parser.parse_args()
     cfg = args.options

@@ -234,7 +234,6 @@ def train_vision(args, metadata, train, val, test):
                 run_name=str(Path('sae') / wandb_name),
                 log_to_wandb=not args.debug,
                 hookpoints=metadata['hookpoints'][name],
-                feature_dims=metadata['feature_dims'][name],
                 grad_acc_steps=2,
                 micro_acc_steps=2,
             )

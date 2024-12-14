@@ -114,7 +114,7 @@ class SparseGPTNeoBlock(nn.Module):
         if config.sparse_mlp:
             self.mlp = SparseMLP(inner_dim, config)
         else:
-            self.mlp = GPTNeoMLP(hidden_size, config) #TODO LQ inner_dim was hidden_size in previous iteration
+            self.mlp = GPTNeoMLP(inner_dim, config)
 
     def forward(
         self,

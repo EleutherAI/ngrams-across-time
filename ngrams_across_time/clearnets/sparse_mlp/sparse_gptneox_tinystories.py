@@ -485,7 +485,7 @@ def main():
 
     trainer = pl.Trainer(
         deterministic=True,
-        precision="bf16",
+        precision="bf16-mixed",
         accelerator="auto",
         max_epochs=max_epochs,
         devices=[1, 2, 3, 4, 5, 6, 7] if not args.debug else [0],

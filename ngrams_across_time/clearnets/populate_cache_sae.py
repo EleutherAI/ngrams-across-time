@@ -16,8 +16,8 @@ import os
 def main(
         cfg: CacheConfig, 
         args,
-        model_name: str = "dense-8m-max-e=200-esp=15-s=42", # "sparse-8m-max-e=200-esp=15-s=42"
-        sae_dir: str = "/mnt/ssd-1/lucia/ngrams-across-time/sae/Dense TinyStories8M s=42 epoch 38"
+        model_name: str,
+        sae_dir: str
     ): 
     # Load the model
     tokenizer = AutoTokenizer.from_pretrained("data/tinystories/restricted_tokenizer_v2")
@@ -38,7 +38,7 @@ def main(
     # submodule = model.transformer.h[layer].mlp
     submodule_dict,model = load_eai_autoencoders(
         model,
-        [0,1,2,3,4,5,6,7],
+        list(range(len(ptl_model.model.transformer.h))),
         sae_dir,
         module="mlp",
     )
@@ -57,7 +57,7 @@ def main(
         submodule_dict, 
         batch_size=cfg.batch_size,
     )
-    name = "SAE"
+    name = "SAE" if not args.transcode else "Transcoder"
     name += f"-{args.size}"
     cache.run(cfg.n_tokens, tokens)
 
@@ -80,7 +80,12 @@ if __name__ == "__main__":
     #ctx len 256
     parser.add_arguments(CacheConfig, dest="options")
     parser.add_argument("--size", type=str, default="8M")
+    parser.add_argument("--transcode", action="store_true")
     args = parser.parse_args()
     cfg = args.options
+
     
-    main(cfg, args)
+    model_name = "mlp=1024-dense-8m-max-e=200-esp=15-s=42" #  # "sparse-8m-max-e=200-esp=15-s=42"
+    sae_dir = f"/mnt/ssd-1/lucia/ngrams-across-time/sae/Dense TinyStories8M{' Transcoder' if args.transcode else ''} 32x 8192 s=42 epoch 21"
+    
+    main(cfg, args, model_name, sae_dir)
